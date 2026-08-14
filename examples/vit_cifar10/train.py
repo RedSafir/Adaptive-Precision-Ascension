@@ -120,14 +120,35 @@ def main():
                 
         train_acc = total_correct / total_samples
         test_acc = test_correct / test_samples
+        
+        # Precision distribution summary
+        precision_names = {0: "FP8", 1: "FP16", 2: "TF32"}
+        layer_precisions = {name: precision_names.get(mod.level, f"Level_{mod.level}") for name, mod in apa_manager.apa_modules.items()}
+        counts = {"FP8": 0, "FP16": 0, "TF32": 0}
+        for lvl in layer_precisions.values():
+            if lvl in counts:
+                counts[lvl] += 1
+                
+        total_apa_layers = len(layer_precisions)
+        fp8_pct = (counts['FP8'] / total_apa_layers * 100) if total_apa_layers > 0 else 0
+        
         print(f"Epoch {epoch+1} Summary: Train Loss={total_loss/total_samples:.4f} Train Acc={train_acc:.4f} | Test Loss={test_loss/test_samples:.4f} Test Acc={test_acc:.4f}")
+        print(f"         Precision State: FP8={counts['FP8']} ({fp8_pct:.1f}%), FP16={counts['FP16']}, TF32={counts['TF32']} (Total: {total_apa_layers} layers)")
         
         log_data = {
+            "event": "epoch_summary",
             "epoch": epoch + 1,
-            "train_loss": total_loss/total_samples,
+            "train_loss": total_loss / total_samples,
             "train_acc": train_acc,
-            "test_loss": test_loss/test_samples,
-            "test_acc": test_acc
+            "test_loss": test_loss / test_samples,
+            "test_acc": test_acc,
+            "precision_distribution": {
+                "fp8": counts["FP8"],
+                "fp16": counts["FP16"],
+                "tf32": counts["TF32"],
+                "fp8_percentage": f"{fp8_pct:.1f}%"
+            },
+            "layer_precisions": layer_precisions
         }
         with open(args.log_file, 'a') as f:
             f.write(json.dumps(log_data) + "\n")
