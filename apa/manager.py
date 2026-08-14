@@ -109,11 +109,13 @@ class APAManager:
             for name, module in self.apa_modules.items():
                 amax_val = module.gpu_amax.item()
                 underflow_val = module.gpu_underflow_ratio.item()
+                has_nonfinite = module.gpu_has_nonfinite.item() > 0
                 
-                if math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX[module.level]:
+                if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX[module.level]:
                     batch_has_overflow = True
                     trigger_modules.append(name)
-                    self._escalate_module(name, module, "OVERFLOW", amax_val)
+                    trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) and amax_val <= THRESHOLDS_MAX[module.level] else amax_val
+                    self._escalate_module(name, module, "OVERFLOW", trigger_val)
                 else:
                     module.ema_underflow_ratio = (self.config.ema_alpha * module.ema_underflow_ratio + 
                                                   (1 - self.config.ema_alpha) * underflow_val)
@@ -122,20 +124,24 @@ class APAManager:
                         
                 module.gpu_amax.zero_()
                 module.gpu_underflow_ratio.zero_()
+                module.gpu_has_nonfinite.zero_()
                 
             min_apa_level = min([m.level for m in self.apa_modules.values()]) if self.apa_modules else LEVEL_FP16
             
             for name, module in self.other_modules.items():
                 amax_val = module.gpu_amax.item()
-                if math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX.get(min_apa_level, float('inf')):
+                has_nonfinite = module.gpu_has_nonfinite.item() > 0
+                if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX.get(min_apa_level, float('inf')):
                     batch_has_overflow = True
                     trigger_modules.append(name)
+                    trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) else amax_val
                     self.logger.log_escalation(
                         self.step_count, name, "NON_PARAMETRIC_OVERFLOW", 
-                        min_apa_level, min_apa_level, amax_val
+                        min_apa_level, min_apa_level, trigger_val
                     )
                 
                 module.gpu_amax.zero_()
+                module.gpu_has_nonfinite.zero_()
                 
         if batch_has_overflow:
             self.logger.log_skip_batch(self.step_count, "OVERFLOW_DETECTED", trigger_modules)
