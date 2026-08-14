@@ -12,7 +12,7 @@ setup(
             'tqdm',
         ],
     },
-    description='Adaptive Precision Architecture — Reckless-start FP8 training with dynamic precision escalation for PyTorch',
+    description='Adaptive Precision Ascension — Reckless-start FP8 training with dynamic precision escalation for PyTorch',
     author='APA Research',
     license='MIT',
 )

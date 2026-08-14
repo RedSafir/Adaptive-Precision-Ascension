@@ -1,10 +1,10 @@
-# APA — Adaptive Precision Architecture
+# APA — Adaptive Precision Ascension
 
 > A reckless-start precision management paradigm for PyTorch training that begins fully in FP8 and dynamically elevates layer dtypes to FP16/TF32 upon real-time overflow/underflow telemetry.
 
 ## Overview
 
-APA (Adaptive Precision Architecture) provides a novel approach to mixed-precision training. Instead of conservatively assigning high precision to stable layers, APA starts **every layer in FP8 (E4M3)** and only dynamically escalates specific modules to FP16 and eventually TF32 when real-time telemetry detects hard overflows (NaN/Inf) or persistent silent underflows.
+APA (Adaptive Precision Ascension) provides a novel approach to mixed-precision training. Instead of conservatively assigning high precision to stable layers, APA starts **every layer in FP8 (E4M3)** and only dynamically escalates specific modules to FP16 and eventually TF32 when real-time telemetry detects hard overflows (NaN/Inf) or persistent silent underflows.
 
 **Key differentiators from traditional AMP/Transformer Engine:**
 - **No `torch.autocast` or `GradScaler`** — APA manages precision entirely through its own escalation ladder
