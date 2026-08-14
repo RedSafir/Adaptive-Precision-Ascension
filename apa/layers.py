@@ -10,7 +10,9 @@ from .telemetry import track_telemetry_on_tensor, compute_underflow_ratio
 class APABoundaryCast(nn.Module):
     def __init__(self, parent_linear):
         super().__init__()
-        self.parent_linear = parent_linear
+        # Use object.__setattr__ to prevent PyTorch from registering parent_linear
+        # as a child submodule in self._modules, which causes an infinite recursion loop in model.to(device)
+        object.__setattr__(self, 'parent_linear', parent_linear)
 
     def forward(self, x):
         working_dtype = self.parent_linear.working_dtype
