@@ -5,9 +5,17 @@ from datetime import datetime
 from typing import Optional
 
 def track_telemetry_on_tensor(tensor: torch.Tensor, gpu_amax: torch.Tensor, gpu_has_nonfinite: torch.Tensor) -> None:
-    """Updates running-max amax and OR-accumulates nonfinite flag on GPU."""
+    """Updates running-max amax and OR-accumulates nonfinite flag on GPU.
+    
+    Tensors are cast to float32 before reductions to support dtypes (like FP8)
+    where max/abs reduction kernels are not implemented in PyTorch.
+    """
     with torch.no_grad():
-        val = torch.max(torch.abs(tensor)).to(torch.float32)
+        if tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            t = tensor.to(torch.float32)
+        else:
+            t = tensor
+        val = torch.max(torch.abs(t)).to(torch.float32)
         torch.maximum(gpu_amax, val, out=gpu_amax)
         nonfinite = (~torch.isfinite(val)).to(torch.int32).view(1)
         torch.maximum(gpu_has_nonfinite, nonfinite, out=gpu_has_nonfinite)
@@ -15,7 +23,11 @@ def track_telemetry_on_tensor(tensor: torch.Tensor, gpu_amax: torch.Tensor, gpu_
 def compute_underflow_ratio(grad_tensor: torch.Tensor, v_min_threshold: float) -> torch.Tensor:
     """Returns scalar ratio of non-zero elements below v_min."""
     with torch.no_grad():
-        abs_grad = torch.abs(grad_tensor)
+        if grad_tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            t = grad_tensor.to(torch.float32)
+        else:
+            t = grad_tensor
+        abs_grad = torch.abs(t)
         non_zero_mask = abs_grad > 0
         non_zero_count = non_zero_mask.sum().to(torch.float32)
         

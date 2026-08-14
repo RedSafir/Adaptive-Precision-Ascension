@@ -40,13 +40,8 @@ class APAManager:
     def get_trainable_parameters(self) -> List[nn.Parameter]:
         params = []
         param_ids = set()
-        expected_count = 0
         
-        # Count all parameters in the model that require grad
-        for p in self.model.parameters():
-            if p.requires_grad:
-                expected_count += 1
-                
+        # 1. Collect master parameters from all APALinear modules
         for name, module in self.apa_modules.items():
             if module.weight_master.requires_grad:
                 params.append(module.weight_master)
@@ -55,22 +50,16 @@ class APAManager:
                 params.append(module.bias_master)
                 param_ids.add(id(module.bias_master))
                 
-        for name, module in self.other_modules.items():
-            for p in module.parameters(recurse=False):
-                if p.requires_grad and id(p) not in param_ids:
-                    params.append(p)
-                    param_ids.add(id(p))
-                    
-        # Exclude any working buffers that might have require_grad=True from expected count
-        working_buffers_count = 0
-        for name, module in self.apa_modules.items():
-            if module.weight_work is not None and module.weight_work.requires_grad:
-                working_buffers_count += 1
-            if module.bias_work is not None and module.bias_work.requires_grad:
-                working_buffers_count += 1
+        # 2. Collect trainable parameters from non-APA modules (LayerNorm, Embedding, etc.)
+        for p in self.model.parameters():
+            if p.requires_grad and id(p) not in param_ids:
+                params.append(p)
+                param_ids.add(id(p))
                 
-        assert len(params) == (expected_count - working_buffers_count), \
-            f"Parameter count mismatch: found {len(params)}, expected {expected_count - working_buffers_count}"
+        # 3. Validation: Verify that all trainable parameters in the model are captured
+        expected_count = sum(1 for p in self.model.parameters() if p.requires_grad)
+        assert len(params) == expected_count, \
+            f"Parameter count mismatch: found {len(params)}, expected {expected_count}"
                     
         return params
 
