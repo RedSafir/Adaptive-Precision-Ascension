@@ -20,6 +20,12 @@ class APABoundaryCast(nn.Module):
             return x.to(working_dtype)
         return x
 
+def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, scale_b: torch.Tensor, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    res = torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype)
+    if isinstance(res, tuple):
+        return res[0]
+    return res
+
 class APALinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, config, level, gpu_amax, gpu_has_nonfinite, update_underflow_metric):
@@ -42,7 +48,7 @@ class APALinearFunction(torch.autograd.Function):
                 original_shape = x.shape
                 x_2d = x.view(-1, x.shape[-1])
                 
-                out_2d, _ = torch._scaled_mm(
+                out_2d = _call_scaled_mm(
                     x_2d, 
                     weight.t(), 
                     scale_a=torch.tensor(1.0, device=x.device), 
@@ -100,7 +106,7 @@ class APALinearFunction(torch.autograd.Function):
                 w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8])
                 
                 if ctx.needs_input_grad[0]:
-                    grad_input_2d, _ = torch._scaled_mm(
+                    grad_input_2d = _call_scaled_mm(
                         g_out_2d, 
                         w_fp8, 
                         scale_a=torch.tensor(1.0, device=x.device), 
@@ -109,7 +115,7 @@ class APALinearFunction(torch.autograd.Function):
                     )
                     grad_input = grad_input_2d.view_as(x)
                 if ctx.needs_input_grad[1]:
-                    grad_weight_2d, _ = torch._scaled_mm(
+                    grad_weight_2d = _call_scaled_mm(
                         g_out_2d.t(),
                         x_2d,
                         scale_a=torch.tensor(1.0, device=x.device), 
