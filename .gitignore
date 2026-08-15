@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+scratch/
 build/
 develop-eggs/
 dist/
@@ -32,6 +33,10 @@ ENV/
 *.bin
 examples/vit_cifar10/data/
 examples/nanogpt_char/input.txt
+
+# Jupyter Notebooks
+*.ipynb
+.ipynb_checkpoints/
 
 # IDE / OS
 .vscode/
