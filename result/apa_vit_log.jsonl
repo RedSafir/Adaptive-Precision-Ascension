@@ -1,0 +1,37 @@
+{"config": {"gamma": 0.9, "theta_underflow": 0.4, "ema_alpha": 0.95, "check_interval": 4, "fp8_simulation_mode": false, "log_file": "apa_vit_log.jsonl", "device": "cuda"}, "args": {"epochs": 10, "batch_size": 128, "lr": 0.001, "apa_preset": "research", "fp8_sim": false, "log_file": "apa_vit_log.jsonl"}}
+{"event": "escalation", "step": 228, "module": "blocks.0.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40111549440127675, "timestamp": "2026-08-14T10:23:10.975110Z"}
+{"event": "escalation", "step": 228, "module": "blocks.0.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.4007531681324002, "timestamp": "2026-08-14T10:23:10.975301Z"}
+{"event": "escalation", "step": 228, "module": "blocks.1.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40111549440127675, "timestamp": "2026-08-14T10:23:10.975390Z"}
+{"event": "escalation", "step": 228, "module": "blocks.1.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40080321082866266, "timestamp": "2026-08-14T10:23:10.975469Z"}
+{"event": "escalation", "step": 228, "module": "blocks.2.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40111549440127675, "timestamp": "2026-08-14T10:23:10.975543Z"}
+{"event": "escalation", "step": 228, "module": "blocks.2.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40073525489230744, "timestamp": "2026-08-14T10:23:10.975617Z"}
+{"event": "escalation", "step": 228, "module": "blocks.3.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40111549440127675, "timestamp": "2026-08-14T10:23:10.975696Z"}
+{"event": "escalation", "step": 228, "module": "blocks.3.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40084734045420833, "timestamp": "2026-08-14T10:23:10.975777Z"}
+{"event": "escalation", "step": 228, "module": "blocks.4.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40111549440127675, "timestamp": "2026-08-14T10:23:10.975858Z"}
+{"event": "escalation", "step": 228, "module": "blocks.4.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.4008312025483379, "timestamp": "2026-08-14T10:23:10.975941Z"}
+{"event": "escalation", "step": 228, "module": "blocks.5.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.40111549440127675, "timestamp": "2026-08-14T10:23:10.976011Z"}
+{"event": "escalation", "step": 228, "module": "blocks.5.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 0.4008005882308714, "timestamp": "2026-08-14T10:23:10.976083Z"}
+{"event": "escalation", "step": 380, "module": "blocks.0.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.41412218715919835, "timestamp": "2026-08-14T10:23:16.051636Z"}
+{"epoch": 1, "train_loss": 2.290717530861879, "train_acc": 0.13197115384615385, "test_loss": 2.2498177402496338, "test_acc": 0.1688}
+{"event": "escalation", "step": 584, "module": "blocks.1.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.402061399186454, "timestamp": "2026-08-14T10:23:23.683275Z"}
+{"event": "escalation", "step": 632, "module": "blocks.5.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40021384640377367, "timestamp": "2026-08-14T10:23:25.277193Z"}
+{"event": "escalation", "step": 636, "module": "blocks.2.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40257994226289207, "timestamp": "2026-08-14T10:23:25.410910Z"}
+{"event": "escalation", "step": 636, "module": "blocks.3.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40054027008847115, "timestamp": "2026-08-14T10:23:25.411136Z"}
+{"event": "escalation", "step": 672, "module": "blocks.4.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40073598450010783, "timestamp": "2026-08-14T10:23:26.627160Z"}
+{"epoch": 2, "train_loss": 2.291171737206288, "train_acc": 0.15208333333333332, "test_loss": 2.214881182861328, "test_acc": 0.1881}
+{"event": "escalation", "step": 928, "module": "head", "reason": "OVERFLOW", "old_level": 0, "new_level": 1, "trigger_value": 403.9029846191406, "timestamp": "2026-08-14T10:23:36.291627Z"}
+{"event": "skip_batch", "step": 928, "reason": "OVERFLOW_DETECTED", "trigger_modules": ["head"], "timestamp": "2026-08-14T10:23:36.292537Z"}
+{"event": "escalation", "step": 936, "module": "blocks.0.mlp.2", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.41494335140735306, "timestamp": "2026-08-14T10:23:36.560727Z"}
+{"event": "escalation", "step": 968, "module": "blocks.4.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.4101124323520191, "timestamp": "2026-08-14T10:23:37.646641Z"}
+{"event": "escalation", "step": 972, "module": "blocks.5.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40714803530068866, "timestamp": "2026-08-14T10:23:37.783280Z"}
+{"event": "escalation", "step": 976, "module": "blocks.1.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.4130178377509879, "timestamp": "2026-08-14T10:23:37.919840Z"}
+{"event": "escalation", "step": 976, "module": "blocks.2.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40056199616784466, "timestamp": "2026-08-14T10:23:37.920040Z"}
+{"event": "escalation", "step": 980, "module": "blocks.3.mha.out_proj", "reason": "SILENT_UNDERFLOW", "old_level": 1, "new_level": 2, "trigger_value": 0.40641460087686526, "timestamp": "2026-08-14T10:23:38.057901Z"}
+{"epoch": 3, "train_loss": 2.2026324956845014, "train_acc": 0.1795673076923077, "test_loss": 2.0921046875, "test_acc": 0.2086}
+{"epoch": 4, "train_loss": 2.0765374599358974, "train_acc": 0.2109775641025641, "test_loss": 2.08139375, "test_acc": 0.2121}
+{"epoch": 5, "train_loss": 2.0624098557692307, "train_acc": 0.21915064102564102, "test_loss": 2.0751171875, "test_acc": 0.2221}
+{"epoch": 6, "train_loss": 2.0501126802884615, "train_acc": 0.22373798076923077, "test_loss": 2.028409375, "test_acc": 0.2398}
+{"epoch": 7, "train_loss": 2.0389798677884614, "train_acc": 0.22892628205128204, "test_loss": 2.0081125, "test_acc": 0.2496}
+{"epoch": 8, "train_loss": 2.0255108173076923, "train_acc": 0.23409455128205128, "test_loss": 2.0089890625, "test_acc": 0.2436}
+{"epoch": 9, "train_loss": 2.017938701923077, "train_acc": 0.23930288461538463, "test_loss": 2.01733125, "test_acc": 0.2428}
+{"epoch": 10, "train_loss": 2.0139072516025642, "train_acc": 0.24252804487179488, "test_loss": 2.0071109375, "test_acc": 0.243}

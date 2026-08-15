@@ -1,0 +1,11 @@
+{"config": {"gamma": 0.9, "theta_underflow": 0.4, "ema_alpha": 0.95, "check_interval": 4, "fp8_simulation_mode": false, "log_file": "apa_gpt_log.jsonl", "device": "cuda"}, "args": {"max_steps": 1000, "batch_size": 32, "lr": 0.0003, "apa_preset": "research", "fp8_sim": false, "log_file": "apa_gpt_log.jsonl", "data_url": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt", "block_size": 128}}
+{"step": 0, "loss": 4.352306365966797}
+{"step": 100, "loss": 4.312843322753906}
+{"step": 200, "loss": 4.293270111083984}
+{"step": 300, "loss": 4.251622676849365}
+{"step": 400, "loss": 4.241394996643066}
+{"step": 500, "loss": 4.208704948425293}
+{"step": 600, "loss": 4.172458648681641}
+{"step": 700, "loss": 4.151070594787598}
+{"step": 800, "loss": 4.140926361083984}
+{"step": 900, "loss": 4.0930562019348145}
