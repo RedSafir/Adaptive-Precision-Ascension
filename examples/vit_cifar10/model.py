@@ -7,11 +7,17 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from apa import APALinear, APAConfig
 
+def _create_linear(in_features, out_features, bias=True, config=None, use_apa=True):
+    if use_apa:
+        return APALinear(in_features, out_features, bias=bias, config=config)
+    else:
+        return nn.Linear(in_features, out_features, bias=bias)
+
 class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=4, dim=256, config=None):
+    def __init__(self, in_channels=3, patch_size=4, dim=256, config=None, use_apa=True):
         super().__init__()
         self.patch_size = patch_size
-        self.proj = APALinear(in_channels * patch_size**2, dim, config=config)
+        self.proj = _create_linear(in_channels * patch_size**2, dim, config=config, use_apa=use_apa)
 
     def forward(self, x):
         # x is (B, C, H, W)
@@ -27,12 +33,12 @@ class PatchEmbedding(nn.Module):
         return x
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads=4, config=None):
+    def __init__(self, dim, heads=4, config=None, use_apa=True):
         super().__init__()
         self.heads = heads
         self.head_dim = dim // heads
-        self.qkv_proj = APALinear(dim, 3 * dim, config=config)
-        self.out_proj = APALinear(dim, dim, config=config)
+        self.qkv_proj = _create_linear(dim, 3 * dim, config=config, use_apa=use_apa)
+        self.out_proj = _create_linear(dim, dim, config=config, use_apa=use_apa)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -47,16 +53,16 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, heads=4, mlp_dim=512, config=None):
+    def __init__(self, dim, heads=4, mlp_dim=512, config=None, use_apa=True):
         super().__init__()
         self.ln1 = nn.LayerNorm(dim)
-        self.mha = MultiHeadAttention(dim, heads=heads, config=config)
+        self.mha = MultiHeadAttention(dim, heads=heads, config=config, use_apa=use_apa)
         
         self.ln2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
-            APALinear(dim, mlp_dim, config=config),
+            _create_linear(dim, mlp_dim, config=config, use_apa=use_apa),
             nn.GELU(),
-            APALinear(mlp_dim, dim, config=config)
+            _create_linear(mlp_dim, dim, config=config, use_apa=use_apa)
         )
 
     def forward(self, x):
@@ -75,22 +81,23 @@ class VisionTransformer(nn.Module):
         depth=6, 
         heads=4, 
         mlp_dim=512, 
-        config=None
+        config=None,
+        use_apa=True
     ):
         super().__init__()
         num_patches = (image_size // patch_size) ** 2
         
-        self.patch_embed = PatchEmbedding(in_channels, patch_size, dim, config=config)
+        self.patch_embed = PatchEmbedding(in_channels, patch_size, dim, config=config, use_apa=use_apa)
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         
         self.blocks = nn.ModuleList([
-            TransformerBlock(dim, heads, mlp_dim, config=config)
+            TransformerBlock(dim, heads, mlp_dim, config=config, use_apa=use_apa)
             for _ in range(depth)
         ])
         
         self.ln = nn.LayerNorm(dim)
-        self.head = APALinear(dim, num_classes, config=config)
+        self.head = _create_linear(dim, num_classes, config=config, use_apa=use_apa)
 
     def forward(self, x):
         B = x.shape[0]
