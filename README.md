@@ -216,3 +216,127 @@ python -m apa.vram_estimator --params 10000000 --batch-size 32 --seq-len 512
 - **`torch._scaled_mm` API Stability**: This is a private PyTorch API that may change between versions. If it breaks after a PyTorch update, enable simulation mode as a workaround.
 - **Gradient Accumulation**: The current implementation uses `grad.copy_()` (overwrite), not `grad.add_()`. For multi-microbatch gradient accumulation, additional logic is needed.
 - **No Distributed Training**: `dist.all_reduce` calls are present in the code but have not been tested in multi-GPU setups.
+
+---
+
+## Forensic Logging (Optional)
+
+Forensic logging answers the question: **"When an escalation happened, which tensor (input/weight/output/gradient) caused it, and which module was upstream?"**
+
+This feature is **off by default** (`enable_forensic_logging=False`). When disabled, there is zero overhead — no extra operations, no extra memory, no file I/O. The normal APA training path is completely unaffected.
+
+### Enabling Forensic Logging
+
+```python
+from apa import APAConfig, APALinear, APAManager
+
+config = APAConfig(
+    log_file='apa_run.jsonl',
+    # --- Forensic options ---
+    enable_forensic_logging=True,
+    # forensic_log_file is auto-derived: 'apa_run_forensic.jsonl'
+    # Set explicitly to override: forensic_log_file='my_forensic.jsonl'
+    forensic_capture_tensor_stats=True,    # mean/std per role (default True)
+    forensic_capture_argmax_index=False,   # flat index of extreme element (see warning)
+)
+```
+
+Or run the included demo:
+
+```bash
+python examples/forensic_demo.py
+```
+
+### Forensic Log Format
+
+One JSON line per escalation event (written only when escalation occurs, not every step):
+
+```json
+{
+  "step": 42,
+  "timestamp_utc": "2026-08-20T07:45:54.123456Z",
+  "module_name": "blocks.2.attn.c_attn",
+  "reason": "OVERFLOW",
+  "level_before": "FP8",
+  "level_after": "FP16",
+  "culprit_tensor_role": "output",
+  "per_role_amax": {
+    "input_activation": 12.4,
+    "weight": 0.85,
+    "output": 432.1,
+    "grad_output": null,
+    "grad_weight": null,
+    "grad_input": null
+  },
+  "amax_value": 432.1,
+  "threshold_at_time": 403.2,
+  "tensor_shape": [32, 128, 768],
+  "dtype_at_time": "float8_e4m3fn",
+  "preceding_module_in_forward_order": "blocks.2.ln_1",
+  "underflow_ratio": null,
+  "argmax_flat_index": null,
+  "per_role_stats": {
+    "output": {"mean": 0.012, "std": 48.3}
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `culprit_tensor_role` | Role with the highest observed amax (the likely cause) |
+| `per_role_amax` | Max absolute value per role; `null` if that role was not observed this step |
+| `preceding_module_in_forward_order` | Module that executed just before this one (see Limitations) |
+| `underflow_ratio` | EMA underflow ratio (only populated for `SILENT_UNDERFLOW` events) |
+| `argmax_flat_index` | Flat index of the extreme element; `null` unless `forensic_capture_argmax_index=True` |
+
+### Reading the Forensic Log
+
+```python
+import json
+
+with open('apa_run_forensic.jsonl') as f:
+    records = [json.loads(line) for line in f if line.strip()]
+
+# All OVERFLOW events
+overflows = [r for r in records if r['reason'] == 'OVERFLOW']
+
+# Which role caused the most escalations?
+from collections import Counter
+Counter(r['culprit_tensor_role'] for r in records).most_common()
+
+# Modules that escalated most often
+Counter(r['module_name'] for r in records).most_common(5)
+```
+
+### Performance Warning
+
+> ⚠️ **Forensic mode significantly slows training — this is by design.**
+>
+> When `enable_forensic_logging=True`, APA performs a CPU-GPU synchronisation
+> (`.item()`) on **every tensor** tracked by `track_telemetry()` at each
+> forward and backward pass.  This is intentional: forensic mode is
+> optimised for **analysis completeness**, not throughput.
+>
+> Use forensic mode for **short diagnostic runs only** — not for production
+> training or benchmarks.  For normal training, leave `enable_forensic_logging=False`
+> (the default).
+
+`forensic_capture_argmax_index=True` adds a further `torch.argmax` call per
+tensor, making it even more expensive.  Enable this only when you need to know
+the exact element position of the extreme value.
+
+### Known Limitations
+
+- **Provenance is linear execution order, not a dataflow graph.** The
+  `preceding_module_in_forward_order` field records which `APALinear` module
+  executed immediately before the escalated one in the registered forward-hook
+  order. In models with parallel branches (residual connections, multi-head
+  attention) this may not be the true upstream data source — it is a pragmatic
+  approximation, not a full autograd graph traversal.
+- **Per-role amax buffers reset each step** (via `pre_step()`). Values in
+  `per_role_amax` reflect the *most recent step's* maximum observations. If
+  escalation is triggered by the soft check (every `check_interval` steps),
+  the amax values are from the latest step, not the step that first breached
+  the threshold.
+- **`null` roles** in `per_role_amax` mean that role was not exercised in the
+  most recent step (e.g. `grad_*` roles are `null` if no backward pass ran).

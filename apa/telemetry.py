@@ -73,3 +73,50 @@ class APAEventLogger:
             "reason": reason,
             "trigger_modules": trigger_modules
         })
+
+
+class APAForensicLogger:
+    """Writes detailed forensic snapshots to a dedicated JSONL file.
+
+    Each line in the forensic log corresponds to a single escalation event and
+    contains per-role tensor amax values, the culprit tensor role, shape info,
+    and the preceding module in forward-execution order.
+
+    This logger is instantiated only when ``APAConfig.enable_forensic_logging``
+    is True.  All I/O is append-only to ``forensic_log_file``.
+
+    Note:
+        Forensic log entries are written *only* at escalation time (once per
+        escalation event), NOT every step.  The volume of this file is bounded
+        by the total number of escalation events throughout training.
+    """
+
+    def __init__(self, forensic_log_file: str) -> None:
+        self.forensic_log_file = forensic_log_file
+        # Ensure parent directory exists up-front so log_forensic_event() never
+        # fails silently on the first write.
+        try:
+            parent = os.path.dirname(os.path.abspath(forensic_log_file))
+            os.makedirs(parent, exist_ok=True)
+        except Exception as e:
+            print(f"[APA Forensic] Warning: could not create log directory: {e}")
+
+    def log_forensic_event(self, record: dict) -> None:
+        """Append one forensic snapshot record to the forensic log file.
+
+        ``record`` must be a JSON-serialisable dict.  A ``timestamp_utc`` field
+        is added automatically before writing.
+
+        Args:
+            record: Dict containing forensic snapshot fields (see
+                ``_capture_forensic_snapshot`` in ``APAManager``).
+        """
+        record = dict(record)  # shallow copy so caller's dict is unchanged
+        record['timestamp_utc'] = datetime.utcnow().isoformat() + 'Z'
+        json_str = json.dumps(record, default=str)
+        print(f"[APA Forensic] {json_str}")
+        try:
+            with open(self.forensic_log_file, 'a', encoding='utf-8') as f:
+                f.write(json_str + '\n')
+        except Exception as e:
+            print(f"[APA Forensic] Warning: failed to write forensic log: {e}")
