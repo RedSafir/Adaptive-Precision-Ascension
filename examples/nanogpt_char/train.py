@@ -28,6 +28,7 @@ def get_args():
     parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
     parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
     parser.add_argument('--interval_telemetry', action='store_true', help="Sample telemetry only on check_interval steps instead of every step (default: False)")
+    parser.add_argument('--compile', action='store_true', help="Use torch.compile to fuse kernels and eliminate Python dispatch latency")
     parser.add_argument('--log_file', type=str, default='apa_gpt_log.jsonl', help="Path to output JSONL log file")
     parser.add_argument('--data_url', type=str, default='https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt')
     parser.add_argument('--block_size', type=int, default=256, help="Context length")
@@ -127,6 +128,10 @@ def main():
         ).to(device)
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+    if args.compile:
+        print("[PyTorch] Compiling model with torch.compile...")
+        model = torch.compile(model)
     
     # Optimizer
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
