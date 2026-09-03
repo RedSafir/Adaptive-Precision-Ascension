@@ -22,6 +22,7 @@ def get_args():
     parser.add_argument('--apa_preset', type=str, default='research', choices=['conservative', 'aggressive', 'research'], help="APA config preset")
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
     parser.add_argument('--fp32_baseline', action='store_true', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
+    parser.add_argument('--strict_fp32', action='store_true', help="Force strict IEEE 754 FP32 math (disables TF32 Tensor Cores, slower but exact 23-bit mantissa)")
     parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
     parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
     parser.add_argument('--telemetry_interval', type=int, default=0, help="Periodic step interval to log per-layer amax and underflow time series (defaults to 50 if --forensic is enabled, else 0)")
@@ -35,11 +36,23 @@ def main():
     use_apa = not args.fp32_baseline
     mode_str = "APA (Adaptive Precision)" if use_apa else "Pure FP32 Baseline (No APA)"
     
+    if args.strict_fp32:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('highest')
+        math_mode = "Strict IEEE 754 Single Precision (TF32 Disabled)"
+    else:
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('high')
+        math_mode = "Standard FP32 (TF32 Tensor Cores Enabled)"
+    
     print("=" * 60)
     print(f"Vision Transformer CIFAR-10 Training")
-    print(f"Mode   : {mode_str}")
-    print(f"Device : {device}")
-    print(f"Epochs : {args.epochs}, Batch Size: {args.batch_size}, LR: {args.lr}")
+    print(f"Mode      : {mode_str}")
+    print(f"Math Dtype: {math_mode}")
+    print(f"Device    : {device}")
+    print(f"Epochs    : {args.epochs}, Batch Size: {args.batch_size}, LR: {args.lr}")
     print("=" * 60)
     
     # Dataset
