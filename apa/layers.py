@@ -523,6 +523,12 @@ class APALinear(nn.Module):
             torch.maximum(self.gpu_underflow_ratio, ratio, out=self.gpu_underflow_ratio)
 
     def forward(self, x):
+        # Terminal Ceiling Fast-Path:
+        # If this layer has reached LEVEL_TF32 (maximum ceiling), it can never escalate further.
+        # Bypass telemetry reductions, custom autograd Function, working copies, and grad sync.
+        if self.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
+            return F.linear(x, self.weight_master, self.bias_master)
+
         if self.weight_work is None:
             self.refresh_working_copy()
 

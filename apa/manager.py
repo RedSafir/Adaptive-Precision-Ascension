@@ -171,6 +171,8 @@ class APAManager:
             self._global_nonfinite.zero_()
             update_weight = (self.step_count % self.config.check_interval == 0)
             for module in self.apa_modules.values():
+                if module.level == LEVEL_TF32:
+                    continue
                 module.update_delayed_scales(update_weight=update_weight)
                 module.refresh_working_copy()
                 module.gpu_has_nonfinite.zero_()
@@ -207,6 +209,8 @@ class APAManager:
     def _sync_grads_to_master(self):
         with torch.no_grad():
             for module in self.apa_modules.values():
+                if module.level == LEVEL_TF32:
+                    continue
                 if module.weight_work is not None and module.weight_work.grad is not None:
                     if module.weight_master.grad is None:
                         module.weight_master.grad = module.weight_work.grad.to(torch.float32).clone()
@@ -241,6 +245,8 @@ class APAManager:
                 all_nonfinite = torch.cat([m.gpu_has_nonfinite for _, m in mod_items]).cpu().tolist()
 
                 for i, (name, module) in enumerate(mod_items):
+                    if module.level == LEVEL_TF32:
+                        continue
                     amax_val = all_amax[i]
                     underflow_val = all_underflow[i]
                     has_nonfinite = all_nonfinite[i] > 0
