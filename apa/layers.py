@@ -162,6 +162,7 @@ class APALinearFunction(torch.autograd.Function):
         # Forensic buffers — all None when forensic mode is off (zero overhead).
         forensic_amax, forensic_shape, forensic_stats, forensic_argmax,
         is_telemetry_step: bool = True,
+        weight_t: Optional[torch.Tensor] = None,
     ):
         """Forward pass for APALinear with NVIDIA-style Delayed Scaling."""
         ctx.config = config
@@ -196,7 +197,8 @@ class APALinearFunction(torch.autograd.Function):
         if level == LEVEL_FP8:
             if config.enable_dynamic_scaling:
                 fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                x_fp8 = (x.to(torch.float32) * scale_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                x_scaled = x * scale_x
+                x_fp8 = torch.clamp(x_scaled, -FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
                 w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
                 s_a = inv_scale_x
                 s_b = inv_scale_w
@@ -217,10 +219,11 @@ class APALinearFunction(torch.autograd.Function):
             else:
                 original_shape = x.shape
                 x_2d = x_fp8.view(-1, x_fp8.shape[-1])
+                w_for_mm = weight_t if weight_t is not None else w_fp8.t().contiguous()
 
                 out_2d = _call_scaled_mm(
                     x_2d,
-                    w_fp8.t(),
+                    w_for_mm,
                     scale_a=s_a,
                     scale_b=s_b,
                     out_dtype=torch.float32
@@ -361,8 +364,8 @@ class APALinearFunction(torch.autograd.Function):
                 config.forensic_capture_argmax_index, forensic_argmax,
             )
 
-        # 19 outputs matching forward parameter count
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        # 20 outputs matching forward parameter count
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class APALinear(nn.Module):
@@ -399,6 +402,7 @@ class APALinear(nn.Module):
         self.boundary_cast = APABoundaryCast(self)
         self._weight_scale_initialized = False
         self.is_telemetry_step: bool = True
+        self.weight_work_t = None
 
         # ---------------------------------------------------------------------------
         # Forensic per-role buffers (CPU dicts, only populated when forensic ON)
@@ -480,16 +484,20 @@ class APALinear(nn.Module):
             if self.level == LEVEL_FP8:
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    w_scaled = (w_detached * self.scale_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
-                    object.__setattr__(self, 'weight_work', w_scaled.to(fwd_dtype).requires_grad_(self.weight_master.requires_grad))
+                    w_scaled = (w_detached * self.scale_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                    object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+                    object.__setattr__(self, 'weight_work_t', w_scaled.t().contiguous())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
-                    object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                    w_fp8 = w_detached.to(self.working_dtype)
+                    object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
+                    object.__setattr__(self, 'weight_work_t', w_fp8.t().contiguous())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
             else:
                 object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                object.__setattr__(self, 'weight_work_t', None)
                 if b_detached is not None:
                     object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
 
@@ -568,6 +576,7 @@ class APALinear(nn.Module):
             # Forensic args (None = forensic off, no overhead)
             f_amax, f_shape, f_stats, f_argmax,
             self.is_telemetry_step,
+            self.weight_work_t,
         )
 
         return out
