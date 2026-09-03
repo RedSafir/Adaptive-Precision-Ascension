@@ -27,6 +27,7 @@ def get_args():
     parser.add_argument('--n_embd', type=int, default=384, help="Embedding dimension")
     parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
     parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
+    parser.add_argument('--interval_telemetry', action='store_true', help="Sample telemetry only on check_interval steps instead of every step (default: False)")
     parser.add_argument('--log_file', type=str, default='apa_gpt_log.jsonl', help="Path to output JSONL log file")
     parser.add_argument('--data_url', type=str, default='https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt')
     parser.add_argument('--block_size', type=int, default=256, help="Context length")
@@ -96,6 +97,7 @@ def main():
             'log_file': args.log_file,
             'enable_forensic_logging': args.forensic,
             'forensic_capture_argmax_index': args.forensic_argmax,
+            'interval_telemetry': args.interval_telemetry,
         }
         config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:

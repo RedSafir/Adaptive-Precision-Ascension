@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument('--no_dual_fp8', action='store_true', help="Disable Trick A (forces E4M3 for backward gradients instead of E5M2)")
     parser.add_argument('--all_apa_layers', action='store_true', help="Apply APA to patch_embed and head layers as well (disables boundary layer preservation)")
     parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
-    parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
+    parser.add_argument('--interval_telemetry', action='store_true', help="Sample telemetry only on check_interval steps instead of every step (default: False)")
     parser.add_argument('--telemetry_interval', type=int, default=0, help="Periodic step interval to log per-layer amax and underflow time series (defaults to 50 if --forensic is enabled, else 0)")
     parser.add_argument('--log_file', type=str, default='apa_vit_log.jsonl', help="Path to output JSONL log file")
     return parser.parse_args()
@@ -98,6 +98,7 @@ def main():
             'telemetry_log_interval': telemetry_int,
             'enable_dynamic_scaling': not args.no_dynamic_scaling,
             'use_dual_fp8': not args.no_dual_fp8,
+            'interval_telemetry': args.interval_telemetry,
         }
         config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:

@@ -169,8 +169,14 @@ class APAManager:
         """
         with torch.no_grad():
             self._global_nonfinite.zero_()
-            update_weight = (self.step_count % self.config.check_interval == 0)
+            is_eval_step = (self.step_count % self.config.check_interval == 0)
+            update_weight = is_eval_step
+            # If interval_telemetry is enabled, only sample telemetry on check_interval steps.
+            # Default is False (continuous per-step telemetry, exactly as before).
+            track_this_step = is_eval_step if self.config.interval_telemetry else True
+
             for module in self.apa_modules.values():
+                module.is_telemetry_step = track_this_step
                 if module.level == LEVEL_TF32:
                     continue
                 module.update_delayed_scales(update_weight=update_weight)

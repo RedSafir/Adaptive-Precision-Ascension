@@ -161,6 +161,7 @@ class APALinearFunction(torch.autograd.Function):
         scale_x, inv_scale_x, inv_scale_w, scale_grad, inv_scale_grad,
         # Forensic buffers — all None when forensic mode is off (zero overhead).
         forensic_amax, forensic_shape, forensic_stats, forensic_argmax,
+        is_telemetry_step: bool = True,
     ):
         """Forward pass for APALinear with NVIDIA-style Delayed Scaling."""
         ctx.config = config
@@ -172,23 +173,25 @@ class APALinearFunction(torch.autograd.Function):
         ctx.forensic_stats = forensic_stats
         ctx.forensic_argmax = forensic_argmax
         ctx.capture_argmax_index = config.forensic_capture_argmax_index
+        ctx.is_telemetry_step = is_telemetry_step
 
-        with torch.no_grad():
-            # Track telemetry directly on input and weight
-            track_telemetry_on_tensor(x, gpu_amax, gpu_has_nonfinite)
-            track_telemetry_on_tensor(weight, gpu_amax, gpu_has_nonfinite)
+        if is_telemetry_step:
+            with torch.no_grad():
+                # Track telemetry directly on input and weight
+                track_telemetry_on_tensor(x, gpu_amax, gpu_has_nonfinite)
+                track_telemetry_on_tensor(weight, gpu_amax, gpu_has_nonfinite)
 
-            if forensic_amax is not None:
-                _update_forensic_role(
-                    x, 'input_activation',
-                    forensic_amax, forensic_shape, forensic_stats,
-                    config.forensic_capture_argmax_index, forensic_argmax,
-                )
-                _update_forensic_role(
-                    weight, 'weight',
-                    forensic_amax, forensic_shape, forensic_stats,
-                    config.forensic_capture_argmax_index, forensic_argmax,
-                )
+                if forensic_amax is not None:
+                    _update_forensic_role(
+                        x, 'input_activation',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
+                    _update_forensic_role(
+                        weight, 'weight',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
 
         if level == LEVEL_FP8:
             if config.enable_dynamic_scaling:
@@ -235,14 +238,15 @@ class APALinearFunction(torch.autograd.Function):
             ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite)
             result = F.linear(x, weight, bias)
 
-        with torch.no_grad():
-            track_telemetry_on_tensor(result, gpu_amax, gpu_has_nonfinite)
-            if forensic_amax is not None:
-                _update_forensic_role(
-                    result, 'output',
-                    forensic_amax, forensic_shape, forensic_stats,
-                    config.forensic_capture_argmax_index, forensic_argmax,
-                )
+        if is_telemetry_step:
+            with torch.no_grad():
+                track_telemetry_on_tensor(result, gpu_amax, gpu_has_nonfinite)
+                if forensic_amax is not None:
+                    _update_forensic_role(
+                        result, 'output',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
 
         return result
 
@@ -259,14 +263,15 @@ class APALinearFunction(torch.autograd.Function):
         forensic_stats = ctx.forensic_stats
         forensic_argmax = ctx.forensic_argmax
 
-        with torch.no_grad():
-            track_telemetry_on_tensor(grad_output, gpu_amax, gpu_has_nonfinite)
-            if forensic_amax is not None:
-                _update_forensic_role(
-                    grad_output, 'grad_output',
-                    forensic_amax, forensic_shape, forensic_stats,
-                    config.forensic_capture_argmax_index, forensic_argmax,
-                )
+        if ctx.is_telemetry_step:
+            with torch.no_grad():
+                track_telemetry_on_tensor(grad_output, gpu_amax, gpu_has_nonfinite)
+                if forensic_amax is not None:
+                    _update_forensic_role(
+                        grad_output, 'grad_output',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
 
         grad_input = grad_weight = grad_bias = None
 
@@ -337,7 +342,7 @@ class APALinearFunction(torch.autograd.Function):
             grad_input = grad_input.to(torch.float32)
         if grad_weight is not None:
             grad_weight = grad_weight.to(torch.float32)
-            if update_underflow_metric is not None:
+            if ctx.is_telemetry_step and update_underflow_metric is not None:
                 update_underflow_metric(grad_weight)
 
             if forensic_amax is not None:
@@ -393,6 +398,7 @@ class APALinear(nn.Module):
         self.ema_underflow_ratio = 0.0
         self.boundary_cast = APABoundaryCast(self)
         self._weight_scale_initialized = False
+        self.is_telemetry_step: bool = True
 
         # ---------------------------------------------------------------------------
         # Forensic per-role buffers (CPU dicts, only populated when forensic ON)
@@ -561,6 +567,7 @@ class APALinear(nn.Module):
             self.inv_scale_grad,
             # Forensic args (None = forensic off, no overhead)
             f_amax, f_shape, f_stats, f_argmax,
+            self.is_telemetry_step,
         )
 
         return out
