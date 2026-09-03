@@ -50,10 +50,12 @@ _warned_scaled_mm = False
 
 def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, scale_b: torch.Tensor, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
     global _warned_scaled_mm
+    # mat1 (a) must be row-major (contiguous)
     if not a.is_contiguous():
         a = a.contiguous()
-    if not b.is_contiguous():
-        b = b.contiguous()
+    # mat2 (b) must be column-major for torch._scaled_mm
+    if not b.t().is_contiguous():
+        b = b.t().contiguous().t()
 
     m, k = a.shape
     k2, n = b.shape
@@ -486,13 +488,14 @@ class APALinear(nn.Module):
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
                     w_scaled = (w_detached * self.scale_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
                     object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
-                    object.__setattr__(self, 'weight_work_t', w_scaled.t().contiguous())
+                    # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
+                    object.__setattr__(self, 'weight_work_t', w_scaled.t())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
                     w_fp8 = w_detached.to(self.working_dtype)
                     object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
-                    object.__setattr__(self, 'weight_work_t', w_fp8.t().contiguous())
+                    object.__setattr__(self, 'weight_work_t', w_fp8.t())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
             else:
