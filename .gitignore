@@ -36,6 +36,8 @@ examples/nanogpt_char/input.txt
 
 # Jupyter Notebooks
 *.ipynb
+!analyze_results.ipynb
+!analyze_forensic.ipynb
 .ipynb_checkpoints/
 
 # IDE / OS
