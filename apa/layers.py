@@ -30,6 +30,14 @@ class APABoundaryCast(nn.Module):
             return x.to(working_dtype)
         return x
 
+def _safe_amax(tensor: torch.Tensor) -> torch.Tensor:
+    with torch.no_grad():
+        if tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            t = tensor.to(torch.float32)
+        else:
+            t = tensor
+        return torch.max(torch.abs(t)).float()
+
 _SCALE_CACHE = {}
 
 def _get_scale_one(device):
@@ -187,8 +195,8 @@ class APALinearFunction(torch.autograd.Function):
             if config.enable_dynamic_scaling:
                 with torch.no_grad():
                     eps = 1e-6
-                    amax_x = torch.max(torch.abs(x)).float()
-                    amax_w = torch.max(torch.abs(weight)).float()
+                    amax_x = _safe_amax(x)
+                    amax_w = _safe_amax(weight)
 
                     s_x = ((config.scale_margin * FP8_E4M3_MAX) / amax_x.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
                     s_w = ((config.scale_margin * FP8_E4M3_MAX) / amax_w.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
@@ -196,8 +204,8 @@ class APALinearFunction(torch.autograd.Function):
                     inv_s_x = (1.0 / s_x).reshape(1).to(device=x.device, dtype=torch.float32)
                     inv_s_w = (1.0 / s_w).reshape(1).to(device=weight.device, dtype=torch.float32)
 
-                    x_scaled = (x.float() * s_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
-                    w_scaled = (weight.float() * s_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+                    x_scaled = (x.to(torch.float32) * s_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+                    w_scaled = (weight.to(torch.float32) * s_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
 
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
                     x_fp8 = x_scaled.to(fwd_dtype)
@@ -280,15 +288,15 @@ class APALinearFunction(torch.autograd.Function):
             if config.enable_dynamic_scaling:
                 with torch.no_grad():
                     eps = 1e-6
-                    amax_g = torch.max(torch.abs(grad_output)).float()
+                    amax_g = _safe_amax(grad_output)
                     s_g = ((config.scale_margin * v_max_bwd) / amax_g.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
                     inv_s_g = (1.0 / s_g).reshape(1).to(device=grad_output.device, dtype=torch.float32)
 
-                    g_scaled = (grad_output.float() * s_g).clamp(-v_max_bwd, v_max_bwd)
+                    g_scaled = (grad_output.to(torch.float32) * s_g).clamp(-v_max_bwd, v_max_bwd)
                     g_fp8 = g_scaled.to(bwd_dtype if bwd_dtype is not None else torch.float32)
 
-                    amax_x = torch.max(torch.abs(x)).float()
-                    amax_w = torch.max(torch.abs(weight)).float()
+                    amax_x = _safe_amax(x)
+                    amax_w = _safe_amax(weight)
                     s_x = ((config.scale_margin * FP8_E4M3_MAX) / amax_x.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
                     s_w = ((config.scale_margin * FP8_E4M3_MAX) / amax_w.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
 
@@ -296,8 +304,8 @@ class APALinearFunction(torch.autograd.Function):
                     inv_s_w = (1.0 / s_w).reshape(1).to(device=weight.device, dtype=torch.float32)
 
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    x_fp8 = (x.float() * s_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
-                    w_fp8 = (weight.float() * s_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                    x_fp8 = (x.to(torch.float32) * s_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                    w_fp8 = (weight.to(torch.float32) * s_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
             else:
                 g_fp8 = grad_output.to(bwd_dtype if bwd_dtype is not None else torch.float32)
                 x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
@@ -458,9 +466,15 @@ class APALinear(nn.Module):
 
     def refresh_working_copy(self):
         with torch.no_grad():
-            self.weight_work = self.weight_master.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad)
-            if self.bias_master is not None:
-                self.bias_work = self.bias_master.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad)
+            if self.level == LEVEL_FP8 and self.config.enable_dynamic_scaling:
+                # Keep working copy in float32 so APALinearFunction can compute uncorrupted amax and scale dynamically
+                self.weight_work = self.weight_master.clone().requires_grad_(self.weight_master.requires_grad)
+                if self.bias_master is not None:
+                    self.bias_work = self.bias_master.clone().requires_grad_(self.bias_master.requires_grad)
+            else:
+                self.weight_work = self.weight_master.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad)
+                if self.bias_master is not None:
+                    self.bias_work = self.bias_master.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad)
 
     def track_telemetry(self, tensor: torch.Tensor, role: str = 'unspecified'):
         """Update the running-max amax and nonfinite flag for this module.
