@@ -392,6 +392,7 @@ class APALinear(nn.Module):
 
         self.ema_underflow_ratio = 0.0
         self.boundary_cast = APABoundaryCast(self)
+        self._weight_scale_initialized = False
 
         # ---------------------------------------------------------------------------
         # Forensic per-role buffers (CPU dicts, only populated when forensic ON)
@@ -430,39 +431,40 @@ class APALinear(nn.Module):
     def current_threshold_max(self):
         return THRESHOLDS_MAX[self.level]
 
-    def update_delayed_scales(self):
-        """Update delayed scales asynchronously using tracked running amax (NVIDIA style)."""
+    def update_delayed_scales(self, update_weight: bool = False):
+        """Update delayed scales asynchronously using tracked running amax (NVIDIA style, 100% on GPU)."""
         if not self.config.enable_dynamic_scaling or self.level != LEVEL_FP8:
             return
         with torch.no_grad():
             eps = 1e-4
-            if self.gpu_amax.item() > 0:
-                amax_val = torch.clamp(self.gpu_amax, min=eps)
-                self.scale_x.copy_(
-                    torch.clamp(
-                        (self.config.scale_margin * FP8_E4M3_MAX) / amax_val,
-                        self.config.scale_min, self.config.scale_max
-                    )
-                )
-                self.inv_scale_x.copy_(1.0 / self.scale_x)
-
-                v_max_bwd = FP8_E5M2_MAX if self.config.use_dual_fp8 else FP8_E4M3_MAX
-                self.scale_grad.copy_(
-                    torch.clamp(
-                        (self.config.scale_margin * v_max_bwd) / amax_val,
-                        self.config.scale_min, self.config.scale_max
-                    )
-                )
-                self.inv_scale_grad.copy_(1.0 / self.scale_grad)
-
-            w_amax = _safe_amax(self.weight_master).clamp(min=eps)
-            self.scale_w.copy_(
-                torch.clamp(
-                    (self.config.scale_margin * FP8_E4M3_MAX) / w_amax,
-                    self.config.scale_min, self.config.scale_max
-                )
+            amax_val = torch.clamp(self.gpu_amax, min=eps)
+            target_scale_x = torch.clamp(
+                (self.config.scale_margin * FP8_E4M3_MAX) / amax_val,
+                self.config.scale_min, self.config.scale_max
             )
-            self.inv_scale_w.copy_(1.0 / self.scale_w)
+            # 100% GPU operation - zero CPU-GPU barriers!
+            self.scale_x.copy_(torch.where(self.gpu_amax > 0, target_scale_x, self.scale_x))
+            self.inv_scale_x.copy_(1.0 / self.scale_x)
+
+            v_max_bwd = FP8_E5M2_MAX if self.config.use_dual_fp8 else FP8_E4M3_MAX
+            target_scale_grad = torch.clamp(
+                (self.config.scale_margin * v_max_bwd) / amax_val,
+                self.config.scale_min, self.config.scale_max
+            )
+            self.scale_grad.copy_(torch.where(self.gpu_amax > 0, target_scale_grad, self.scale_grad))
+            self.inv_scale_grad.copy_(1.0 / self.scale_grad)
+
+            # Weight scales change very slowly: update periodically or initially
+            if update_weight or not self._weight_scale_initialized:
+                w_amax = _safe_amax(self.weight_master).clamp(min=eps)
+                self.scale_w.copy_(
+                    torch.clamp(
+                        (self.config.scale_margin * FP8_E4M3_MAX) / w_amax,
+                        self.config.scale_min, self.config.scale_max
+                    )
+                )
+                self.inv_scale_w.copy_(1.0 / self.scale_w)
+                self._weight_scale_initialized = True
 
     def refresh_working_copy(self):
         with torch.no_grad():

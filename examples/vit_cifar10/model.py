@@ -45,10 +45,9 @@ class MultiHeadAttention(nn.Module):
         qkv = self.qkv_proj(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: t.view(B, N, self.heads, self.head_dim).transpose(1, 2), qkv)
 
-        attn = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
-        attn = attn.softmax(dim=-1)
-        
-        out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        # Hardware-accelerated FlashAttention / SDPA kernel (PyTorch 2.0+)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(1, 2).reshape(B, N, C)
         out = self.out_proj(out)
         return out
 

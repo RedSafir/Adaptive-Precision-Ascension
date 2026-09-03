@@ -169,8 +169,9 @@ class APAManager:
         """
         with torch.no_grad():
             self._global_nonfinite.zero_()
+            update_weight = (self.step_count % self.config.check_interval == 0)
             for module in self.apa_modules.values():
-                module.update_delayed_scales()
+                module.update_delayed_scales(update_weight=update_weight)
                 module.refresh_working_copy()
                 module.gpu_has_nonfinite.zero_()
 

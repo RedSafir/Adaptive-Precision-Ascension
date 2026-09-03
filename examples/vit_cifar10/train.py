@@ -8,6 +8,10 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 import json
+import warnings
+
+warnings.filterwarnings("ignore", message=".*Full backward hook is firing.*")
+warnings.filterwarnings("ignore", message=".*align should be passed as Python or NumPy boolean.*")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.dirname(__file__))
