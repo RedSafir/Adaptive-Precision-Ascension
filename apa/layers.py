@@ -373,8 +373,8 @@ class APALinear(nn.Module):
         else:
             self.register_parameter('bias_master', None)
 
-        self.weight_work = None
-        self.bias_work = None
+        object.__setattr__(self, 'weight_work', None)
+        object.__setattr__(self, 'bias_work', None)
 
         self.level = LEVEL_FP8
 
@@ -466,21 +466,24 @@ class APALinear(nn.Module):
 
     def refresh_working_copy(self):
         with torch.no_grad():
+            w_detached = self.weight_master.detach()
+            b_detached = self.bias_master.detach() if self.bias_master is not None else None
+
             if self.level == LEVEL_FP8:
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    w_scaled = (self.weight_master * self.scale_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
-                    self.weight_work = w_scaled.to(fwd_dtype).requires_grad_(self.weight_master.requires_grad)
-                    if self.bias_master is not None:
-                        self.bias_work = self.bias_master.to(torch.float32).requires_grad_(self.bias_master.requires_grad)
+                    w_scaled = (w_detached * self.scale_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+                    object.__setattr__(self, 'weight_work', w_scaled.to(fwd_dtype).requires_grad_(self.weight_master.requires_grad))
+                    if b_detached is not None:
+                        object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
-                    self.weight_work = self.weight_master.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad)
-                    if self.bias_master is not None:
-                        self.bias_work = self.bias_master.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad)
+                    object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                    if b_detached is not None:
+                        object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
             else:
-                self.weight_work = self.weight_master.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad)
-                if self.bias_master is not None:
-                    self.bias_work = self.bias_master.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad)
+                object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                if b_detached is not None:
+                    object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
 
     def track_telemetry(self, tensor: torch.Tensor, role: str = 'unspecified'):
         """Update the running-max amax and nonfinite flag for this module.
