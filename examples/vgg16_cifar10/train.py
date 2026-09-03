@@ -205,8 +205,14 @@ def main():
                 "mode": "apa" if use_apa else "fp32_baseline",
                 "precision_distribution": {"fp8": dist[0], "fp16": dist[1], "tf32": dist[2]} if use_apa else {"fp32": "100%"},
                 "layer_precisions": layer_status if use_apa else {}
-            }
             f.write(json.dumps(epoch_record) + "\n")
+
+        if use_apa and args.forensic and config.forensic_log_file and config.forensic_log_file != args.log_file:
+            try:
+                with open(config.forensic_log_file, 'a', encoding='utf-8') as ff:
+                    ff.write(json.dumps(epoch_record) + "\n")
+            except Exception:
+                pass
 
     total_training_time = time.time() - total_training_start
     print("=" * 65)

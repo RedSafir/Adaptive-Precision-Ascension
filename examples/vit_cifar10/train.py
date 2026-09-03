@@ -216,6 +216,13 @@ def main():
             
         with open(args.log_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(log_data) + "\n")
+
+        if use_apa and args.forensic and config.forensic_log_file and config.forensic_log_file != args.log_file:
+            try:
+                with open(config.forensic_log_file, 'a', encoding='utf-8') as ff:
+                    ff.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
             
     total_duration = time.time() - total_training_start
     print("=" * 60)
