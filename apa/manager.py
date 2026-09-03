@@ -170,6 +170,7 @@ class APAManager:
         with torch.no_grad():
             self._global_nonfinite.zero_()
             for module in self.apa_modules.values():
+                module.update_delayed_scales()
                 module.refresh_working_copy()
                 module.gpu_has_nonfinite.zero_()
 
