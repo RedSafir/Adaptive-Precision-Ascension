@@ -165,6 +165,9 @@ config = APAConfig(
 # ViT on CIFAR-10 (with FP8 simulation mode for testing)
 python examples/vit_cifar10/train.py --fp8_sim --epochs 2
 
+# VGG-16 CNN on CIFAR-10
+python examples/vgg16_cifar10/train.py --epochs 20 --log_file result/apa_vgg16_20ep.jsonl
+
 # nanoGPT character-level language model
 python examples/nanogpt_char/train.py --fp8_sim --max_steps 200
 ```
