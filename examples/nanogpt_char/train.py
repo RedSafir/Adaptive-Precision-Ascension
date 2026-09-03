@@ -20,12 +20,16 @@ def get_args():
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
     parser.add_argument('--apa_preset', type=str, default='research', choices=['conservative', 'aggressive', 'research'], help="APA config preset")
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
-    parser.add_argument('--fp32_baseline', action='store_true', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
+    parser.add_argument('--fp32_baseline', '--no_apa', dest='fp32_baseline', action='store_true', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
+    parser.add_argument('--strict_fp32', action='store_true', help="Strict IEEE 754 float32 mode (disable TF32 on Ampere/Ada/Blackwell Tensor Cores)")
+    parser.add_argument('--n_layer', type=int, default=6, help="Number of transformer layers")
+    parser.add_argument('--n_head', type=int, default=6, help="Number of attention heads")
+    parser.add_argument('--n_embd', type=int, default=384, help="Embedding dimension")
     parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
     parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
     parser.add_argument('--log_file', type=str, default='apa_gpt_log.jsonl', help="Path to output JSONL log file")
     parser.add_argument('--data_url', type=str, default='https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt')
-    parser.add_argument('--block_size', type=int, default=128, help="Context length")
+    parser.add_argument('--block_size', type=int, default=256, help="Context length")
     return parser.parse_args()
 
 def get_batch(data, batch_size, block_size, device):
@@ -41,11 +45,22 @@ def main():
     use_apa = not args.fp32_baseline
     mode_str = "APA (Adaptive Precision)" if use_apa else "Pure FP32 Baseline (No APA)"
     
+    if args.strict_fp32:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        math_dtype_str = "Strict IEEE 754 Single Precision (TF32 Disabled)"
+    else:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        math_dtype_str = "Standard FP32 (TF32 Tensor Cores Enabled)"
+    
     print("=" * 60)
     print(f"nanoGPT Character-Level Language Model Training")
-    print(f"Mode   : {mode_str}")
-    print(f"Device : {device}")
-    print(f"Steps  : {args.max_steps}, Batch Size: {args.batch_size}, LR: {args.lr}")
+    print(f"Mode      : {mode_str}")
+    print(f"Math Dtype: {math_dtype_str}")
+    print(f"Device    : {device}")
+    print(f"Model     : {args.n_layer} layers, {args.n_head} heads, {args.n_embd} dim, context={args.block_size}")
+    print(f"Steps     : {args.max_steps}, Batch Size: {args.batch_size}, LR: {args.lr}")
     print("=" * 60)
     
     # Download data
@@ -86,12 +101,28 @@ def main():
         if args.fp8_sim:
             config.fp8_simulation_mode = True
             
-        model = GPT(vocab_size=vocab_size, block_size=args.block_size, config=config, use_apa=True).to(device)
+        model = GPT(
+            vocab_size=vocab_size, 
+            block_size=args.block_size, 
+            n_layer=args.n_layer,
+            n_head=args.n_head,
+            n_embd=args.n_embd,
+            config=config, 
+            use_apa=True
+        ).to(device)
         apa_manager = APAManager(model, config)
         trainable_params = apa_manager.get_trainable_parameters()
     else:
         config = None
-        model = GPT(vocab_size=vocab_size, block_size=args.block_size, config=None, use_apa=False).to(device)
+        model = GPT(
+            vocab_size=vocab_size, 
+            block_size=args.block_size, 
+            n_layer=args.n_layer,
+            n_head=args.n_head,
+            n_embd=args.n_embd,
+            config=None, 
+            use_apa=False
+        ).to(device)
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     

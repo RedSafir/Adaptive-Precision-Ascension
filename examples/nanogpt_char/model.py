@@ -39,11 +39,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        y = att @ v
+        # FlashAttention (PyTorch 2.0+ native fused causal attention)
+        y = F.scaled_dot_product_attention(
+            q, k, v, 
+            is_causal=True, 
+            dropout_p=self.dropout if self.training else 0.0
+        )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         
         y = self.resid_dropout(self.c_proj(y))
