@@ -22,6 +22,8 @@ def get_args():
     parser.add_argument('--apa_preset', type=str, default='research', choices=['conservative', 'aggressive', 'research'], help="APA config preset")
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
     parser.add_argument('--fp32_baseline', action='store_true', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
+    parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
+    parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
     parser.add_argument('--log_file', type=str, default='apa_vit_log.jsonl', help="Path to output JSONL log file")
     return parser.parse_args()
 
@@ -69,6 +71,9 @@ def main():
         config = preset_map[args.apa_preset](device=str(device), log_file=args.log_file)
         if args.fp8_sim:
             config.fp8_simulation_mode = True
+        if args.forensic:
+            config.enable_forensic_logging = True
+            config.forensic_capture_argmax_index = args.forensic_argmax
             
         model = VisionTransformer(config=config, use_apa=True).to(device)
         apa_manager = APAManager(model, config)
