@@ -38,16 +38,13 @@ def _make_simple_model(config):
 def _run_overflow_step(manager, model, device='cpu'):
     """Run one step that guarantees an overflow escalation.
 
-    Injects values exceeding FP8 threshold into the first APALinear's amax
-    buffer directly, then calls post_backward_sync_and_eval() to trigger
-    _do_full_evaluation() → _escalate_module().
+    Tracks an extreme value on role='input_activation' to simulate an overflow event,
+    then calls post_backward_sync_and_eval() to trigger _do_full_evaluation() → _escalate_module().
     """
     manager.pre_step()
-    # Force an amax value well above the FP8 threshold (448 * 0.9 = 403.2)
     first_module = list(manager.apa_modules.values())[0]
-    with torch.no_grad():
-        first_module.gpu_amax.fill_(500.0)  # exceeds THRESHOLDS_MAX[LEVEL_FP8]
-    # post_backward_sync_and_eval with check_interval=1 always calls _do_full_evaluation
+    overflow_tensor = torch.tensor([500.0])
+    first_module.track_telemetry(overflow_tensor, role='input_activation')
     manager.post_backward_sync_and_eval()
 
 

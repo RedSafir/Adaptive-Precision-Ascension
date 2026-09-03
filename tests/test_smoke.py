@@ -46,16 +46,15 @@ class TestSmoke(unittest.TestCase):
         self.assertTrue(escalation_happened)
 
     def test_normal_training_no_escalation(self):
+        torch.manual_seed(42)
         model = SmokeModel(self.config)
         manager = APAManager(model, config=self.config)
-        nn.init.normal_(model.linear1.weight_master, mean=0, std=0.01)
-        nn.init.normal_(model.linear2.weight_master, mean=0, std=0.01)
-        optimizer = torch.optim.SGD(manager.get_trainable_parameters(), lr=0.001)
+        optimizer = torch.optim.SGD(manager.get_trainable_parameters(), lr=0.01)
         
         for _ in range(10):
             manager.pre_step()
             optimizer.zero_grad(set_to_none=True)
-            x = torch.randn(8, 16) * 0.1
+            x = torch.randn(8, 16)
             loss = model(x).sum()
             loss.backward()
             should_step = manager.post_backward_sync_and_eval()
