@@ -23,6 +23,9 @@ def get_args():
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
     parser.add_argument('--fp32_baseline', action='store_true', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
     parser.add_argument('--strict_fp32', action='store_true', help="Force strict IEEE 754 FP32 math (disables TF32 Tensor Cores, slower but exact 23-bit mantissa)")
+    parser.add_argument('--no_dynamic_scaling', action='store_true', help="Disable Trick B (Dynamic Amax Delayed Scaling)")
+    parser.add_argument('--no_dual_fp8', action='store_true', help="Disable Trick A (forces E4M3 for backward gradients instead of E5M2)")
+    parser.add_argument('--all_apa_layers', action='store_true', help="Apply APA to patch_embed and head layers as well (disables boundary layer preservation)")
     parser.add_argument('--forensic', action='store_true', help="Enable detailed forensic logging on escalation")
     parser.add_argument('--forensic_argmax', action='store_true', help="Capture flat argmax index in forensic snapshots (opt-in)")
     parser.add_argument('--telemetry_interval', type=int, default=0, help="Periodic step interval to log per-layer amax and underflow time series (defaults to 50 if --forensic is enabled, else 0)")
@@ -89,12 +92,15 @@ def main():
             'enable_forensic_logging': args.forensic,
             'forensic_capture_argmax_index': args.forensic_argmax,
             'telemetry_log_interval': telemetry_int,
+            'enable_dynamic_scaling': not args.no_dynamic_scaling,
+            'use_dual_fp8': not args.no_dual_fp8,
         }
         config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:
             config.fp8_simulation_mode = True
             
-        model = VisionTransformer(config=config, use_apa=True).to(device)
+        preserve_crit = not args.all_apa_layers
+        model = VisionTransformer(config=config, use_apa=True, preserve_critical_layers=preserve_crit).to(device)
         apa_manager = APAManager(model, config)
         trainable_params = apa_manager.get_trainable_parameters()
     else:

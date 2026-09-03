@@ -82,12 +82,17 @@ class VisionTransformer(nn.Module):
         heads=4, 
         mlp_dim=512, 
         config=None,
-        use_apa=True
+        use_apa=True,
+        preserve_critical_layers=True
     ):
         super().__init__()
         num_patches = (image_size // patch_size) ** 2
         
-        self.patch_embed = PatchEmbedding(in_channels, patch_size, dim, config=config, use_apa=use_apa)
+        # In modern mixed-precision and FP8 architectures (TransformerEngine, Megatron),
+        # boundary layers (input patch embedding and output classification head) are
+        # typically preserved in FP16/FP32 to ensure stable representation and lossless logits.
+        use_apa_boundary = use_apa and not preserve_critical_layers
+        self.patch_embed = PatchEmbedding(in_channels, patch_size, dim, config=config, use_apa=use_apa_boundary)
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         
@@ -97,7 +102,7 @@ class VisionTransformer(nn.Module):
         ])
         
         self.ln = nn.LayerNorm(dim)
-        self.head = _create_linear(dim, num_classes, config=config, use_apa=use_apa)
+        self.head = _create_linear(dim, num_classes, config=config, use_apa=use_apa_boundary)
 
     def forward(self, x):
         B = x.shape[0]

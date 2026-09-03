@@ -4,7 +4,13 @@ import torch.nn.functional as F
 import math
 from typing import Optional
 
-from .config import APAConfig, LEVEL_FP8, LEVEL_FP16, LEVEL_TF32, DTYPE_MAP, THRESHOLDS_MIN
+from .config import (
+    APAConfig, LEVEL_FP8, LEVEL_FP16, LEVEL_TF32,
+    DTYPE_MAP, DTYPE_BACKWARD_MAP,
+    THRESHOLDS_MIN, THRESHOLDS_MAX,
+    THRESHOLDS_MIN_BWD, THRESHOLDS_MAX_BWD,
+    FP8_E4M3_MAX, FP8_E5M2_MAX
+)
 from .telemetry import track_telemetry_on_tensor, compute_underflow_ratio
 
 class APABoundaryCast(nn.Module):
@@ -15,6 +21,10 @@ class APABoundaryCast(nn.Module):
         object.__setattr__(self, 'parent_linear', parent_linear)
 
     def forward(self, x):
+        # If dynamic scaling is active at FP8, keep x in full precision (float32)
+        # so that APALinearFunction can accurately compute amax and scale factors before quantizing.
+        if self.parent_linear.level == LEVEL_FP8 and self.parent_linear.config.enable_dynamic_scaling:
+            return x.to(torch.float32) if x.dtype not in (torch.float32, torch.float16, torch.bfloat16) else x
         working_dtype = self.parent_linear.working_dtype
         if x.dtype != working_dtype:
             return x.to(working_dtype)
@@ -139,22 +149,15 @@ class APALinearFunction(torch.autograd.Function):
         config, level,
         gpu_amax, gpu_has_nonfinite,
         update_underflow_metric,
+        working_bwd_dtype,
         # Forensic buffers — all None when forensic mode is off (zero overhead).
         forensic_amax, forensic_shape, forensic_stats, forensic_argmax,
     ):
-        """Forward pass for APALinear with optional per-role forensic tracking.
-
-        When ``forensic_amax`` is None (default, forensic mode off) this
-        function is identical to the original implementation.  No additional
-        operations are performed and there is no overhead.
-
-        When forensic mode is on, ``_update_forensic_role`` is called for
-        each tracked tensor performing a CPU-GPU sync per tensor.  This
-        intentionally slows training — forensic mode is for analysis only.
-        """
+        """Forward pass for APALinear with optional per-role forensic tracking."""
         ctx.config = config
         ctx.level = level
         ctx.update_underflow_metric = update_underflow_metric
+        ctx.working_bwd_dtype = working_bwd_dtype
         ctx.forensic_amax = forensic_amax
         ctx.forensic_shape = forensic_shape
         ctx.forensic_stats = forensic_stats
@@ -181,20 +184,44 @@ class APALinearFunction(torch.autograd.Function):
                 )
 
         if level == LEVEL_FP8:
-            if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
+            if config.enable_dynamic_scaling:
+                with torch.no_grad():
+                    eps = 1e-6
+                    amax_x = torch.max(torch.abs(x)).float()
+                    amax_w = torch.max(torch.abs(weight)).float()
+
+                    s_x = ((config.scale_margin * FP8_E4M3_MAX) / amax_x.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
+                    s_w = ((config.scale_margin * FP8_E4M3_MAX) / amax_w.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
+
+                    inv_s_x = (1.0 / s_x).reshape(1).to(device=x.device, dtype=torch.float32)
+                    inv_s_w = (1.0 / s_w).reshape(1).to(device=weight.device, dtype=torch.float32)
+
+                    x_scaled = (x.float() * s_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+                    w_scaled = (weight.float() * s_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+
+                    fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
+                    x_fp8 = x_scaled.to(fwd_dtype)
+                    w_fp8 = w_scaled.to(fwd_dtype)
+            else:
                 x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
                 w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else weight
+                inv_s_x = _get_scale_one(x.device)
+                inv_s_w = _get_scale_one(weight.device)
 
-                result = F.linear(x_fp8.to(torch.float32), w_fp8.to(torch.float32), bias.to(torch.float32) if bias is not None else None)
+            if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
+                if config.enable_dynamic_scaling:
+                    result = F.linear(x_fp8.float() * inv_s_x, w_fp8.float() * inv_s_w, bias.float() if bias is not None else None)
+                else:
+                    result = F.linear(x_fp8.float(), w_fp8.float(), bias.float() if bias is not None else None)
             else:
                 original_shape = x.shape
-                x_2d = x.view(-1, x.shape[-1])
+                x_2d = x_fp8.view(-1, x_fp8.shape[-1])
 
                 out_2d = _call_scaled_mm(
                     x_2d,
-                    weight.t(),
-                    scale_a=_get_scale_one(x.device),
-                    scale_b=_get_scale_one(weight.device),
+                    w_fp8.t(),
+                    scale_a=inv_s_x,
+                    scale_b=inv_s_w,
                     out_dtype=torch.float32
                 )
 
@@ -226,6 +253,7 @@ class APALinearFunction(torch.autograd.Function):
         config = ctx.config
         level = ctx.level
         update_underflow_metric = ctx.update_underflow_metric
+        working_bwd_dtype = ctx.working_bwd_dtype
         forensic_amax = ctx.forensic_amax
         forensic_shape = ctx.forensic_shape
         forensic_stats = ctx.forensic_stats
@@ -246,14 +274,42 @@ class APALinearFunction(torch.autograd.Function):
         grad_input = grad_weight = grad_bias = None
 
         if level == LEVEL_FP8:
-            if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
-                g_out = grad_output.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else grad_output
+            bwd_dtype = working_bwd_dtype
+            v_max_bwd = FP8_E5M2_MAX if (config.use_dual_fp8 and bwd_dtype == DTYPE_BACKWARD_MAP[0]) else FP8_E4M3_MAX
+
+            if config.enable_dynamic_scaling:
+                with torch.no_grad():
+                    eps = 1e-6
+                    amax_g = torch.max(torch.abs(grad_output)).float()
+                    s_g = ((config.scale_margin * v_max_bwd) / amax_g.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
+                    inv_s_g = (1.0 / s_g).reshape(1).to(device=grad_output.device, dtype=torch.float32)
+
+                    g_scaled = (grad_output.float() * s_g).clamp(-v_max_bwd, v_max_bwd)
+                    g_fp8 = g_scaled.to(bwd_dtype if bwd_dtype is not None else torch.float32)
+
+                    amax_x = torch.max(torch.abs(x)).float()
+                    amax_w = torch.max(torch.abs(weight)).float()
+                    s_x = ((config.scale_margin * FP8_E4M3_MAX) / amax_x.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
+                    s_w = ((config.scale_margin * FP8_E4M3_MAX) / amax_w.clamp(min=eps)).clamp(min=config.scale_min, max=config.scale_max)
+
+                    inv_s_x = (1.0 / s_x).reshape(1).to(device=x.device, dtype=torch.float32)
+                    inv_s_w = (1.0 / s_w).reshape(1).to(device=weight.device, dtype=torch.float32)
+
+                    fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
+                    x_fp8 = (x.float() * s_x).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                    w_fp8 = (weight.float() * s_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+            else:
+                g_fp8 = grad_output.to(bwd_dtype if bwd_dtype is not None else torch.float32)
                 x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
                 w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else weight
+                inv_s_g = _get_scale_one(grad_output.device)
+                inv_s_x = _get_scale_one(x.device)
+                inv_s_w = _get_scale_one(weight.device)
 
-                g_out_f32 = g_out.to(torch.float32)
-                x_f32 = x_fp8.to(torch.float32)
-                w_f32 = w_fp8.to(torch.float32)
+            if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
+                g_out_f32 = g_fp8.float() * inv_s_g if config.enable_dynamic_scaling else g_fp8.float()
+                x_f32 = x_fp8.float() * inv_s_x if config.enable_dynamic_scaling else x_fp8.float()
+                w_f32 = w_fp8.float() * inv_s_w if config.enable_dynamic_scaling else w_fp8.float()
 
                 if ctx.needs_input_grad[0]:
                     grad_input = g_out_f32 @ w_f32
@@ -265,16 +321,15 @@ class APALinearFunction(torch.autograd.Function):
                     g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
                     grad_bias = g_out_2d.sum(dim=0)
             else:
-                g_out_2d = grad_output.reshape(-1, grad_output.shape[-1]).to(DTYPE_MAP[LEVEL_FP8])
-                x_2d = x.reshape(-1, x.shape[-1]).to(DTYPE_MAP[LEVEL_FP8])
-                w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8])
+                g_out_2d = g_fp8.reshape(-1, g_fp8.shape[-1])
+                x_2d = x_fp8.reshape(-1, x_fp8.shape[-1])
 
                 if ctx.needs_input_grad[0]:
                     grad_input_2d = _call_scaled_mm(
                         g_out_2d,
                         w_fp8,
-                        scale_a=_get_scale_one(x.device),
-                        scale_b=_get_scale_one(weight.device),
+                        scale_a=inv_s_g,
+                        scale_b=inv_s_w,
                         out_dtype=torch.float32
                     )
                     grad_input = grad_input_2d.view_as(x)
@@ -282,8 +337,8 @@ class APALinearFunction(torch.autograd.Function):
                     grad_weight_2d = _call_scaled_mm(
                         g_out_2d.t(),
                         x_2d,
-                        scale_a=_get_scale_one(x.device),
-                        scale_b=_get_scale_one(weight.device),
+                        scale_a=inv_s_g,
+                        scale_b=inv_s_x,
                         out_dtype=torch.float32
                     )
                     grad_weight = grad_weight_2d.view_as(weight)
@@ -323,9 +378,8 @@ class APALinearFunction(torch.autograd.Function):
             )
 
         # Return None for all non-tensor args (config, level, gpu_amax, etc.)
-        # and for the 4 forensic dict args — dicts are passed by reference so
-        # they have already been mutated in-place above.
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None
+        # and for the 4 forensic dict args.
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None, None
 
 
 class APALinear(nn.Module):
@@ -387,8 +441,20 @@ class APALinear(nn.Module):
         return DTYPE_MAP[self.level] if DTYPE_MAP[self.level] is not None else torch.float32
 
     @property
+    def working_bwd_dtype(self):
+        if self.level == LEVEL_FP8 and self.config.use_dual_fp8:
+            return DTYPE_BACKWARD_MAP[0] if DTYPE_BACKWARD_MAP[0] is not None else torch.float32
+        return DTYPE_BACKWARD_MAP.get(self.level, torch.float32)
+
+    @property
     def current_threshold_min(self):
+        if self.level == LEVEL_FP8 and self.config.use_dual_fp8:
+            return THRESHOLDS_MIN_BWD[0]
         return THRESHOLDS_MIN[self.level]
+
+    @property
+    def current_threshold_max(self):
+        return THRESHOLDS_MAX[self.level]
 
     def refresh_working_copy(self):
         with torch.no_grad():
@@ -456,6 +522,7 @@ class APALinear(nn.Module):
             self.gpu_amax,
             self.gpu_has_nonfinite,
             self.update_underflow_metric,
+            self.working_bwd_dtype,
             # Forensic args (None = forensic off, no overhead)
             f_amax, f_shape, f_stats, f_argmax,
         )

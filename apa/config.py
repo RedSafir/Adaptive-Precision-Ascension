@@ -6,15 +6,33 @@ LEVEL_FP8 = 0
 LEVEL_FP16 = 1
 LEVEL_TF32 = 2
 
+FP8_E4M3_MAX = 448.0
+FP8_E5M2_MAX = 57344.0
+FP16_MAX = 65504.0
+
 THRESHOLDS_MAX = {
-    0: 0.90 * 448.0,
-    1: 0.90 * 65504.0,
+    0: 0.90 * FP8_E4M3_MAX,
+    1: 0.90 * FP16_MAX,
+    2: float('inf')
+}
+
+# Backward thresholds (Trick A: E5M2 has wider dynamic range)
+THRESHOLDS_MAX_BWD = {
+    0: 0.90 * FP8_E5M2_MAX,
+    1: 0.90 * FP16_MAX,
     2: float('inf')
 }
 
 THRESHOLDS_MIN = {
-    0: 0.015625,
-    1: 6.1035e-5,
+    0: 0.015625,      # 2^-6 (E4M3 normal limit)
+    1: 6.1035e-5,     # 2^-14 (FP16 normal limit)
+    2: 0.0
+}
+
+# Backward floor with E5M2 (Trick A: underflow floor is 256x deeper)
+THRESHOLDS_MIN_BWD = {
+    0: 6.1035e-5,     # 2^-14 (E5M2 normal limit, matching FP16)
+    1: 6.1035e-5,     # 2^-14
     2: 0.0
 }
 
@@ -23,8 +41,21 @@ try:
 except AttributeError:
     _float8_e4m3fn = None
 
+try:
+    _float8_e5m2 = torch.float8_e5m2
+except AttributeError:
+    _float8_e5m2 = None
+
+# Forward dtype map (E4M3 -> FP16 -> TF32)
 DTYPE_MAP = {
     0: _float8_e4m3fn,
+    1: torch.float16,
+    2: torch.float32
+}
+
+# Backward dtype map (Trick A: E5M2 -> FP16 -> TF32)
+DTYPE_BACKWARD_MAP = {
+    0: _float8_e5m2 if _float8_e5m2 is not None else _float8_e4m3fn,
     1: torch.float16,
     2: torch.float32
 }
@@ -38,6 +69,15 @@ class APAConfig:
     fp8_simulation_mode: bool = False
     log_file: Optional[str] = None
     device: str = 'cuda'
+
+    # ---------------------------------------------------------------------------
+    # Advanced FP8 Enhancements: Trick A (Dual FP8) & Trick B (Dynamic Scaling)
+    # ---------------------------------------------------------------------------
+    enable_dynamic_scaling: bool = True   # Trick B: Amax-based delayed dynamic scaling
+    use_dual_fp8: bool = True             # Trick A: E4M3 for forward, E5M2 for backward
+    scale_min: float = 1e-4
+    scale_max: float = 65536.0
+    scale_margin: float = 0.90
 
     # ---------------------------------------------------------------------------
     # Forensic Logging (opt-in, disabled by default)
