@@ -436,6 +436,7 @@ class APAManager:
         self.step_count += 1
         self._sync_grads_to_master()
 
+        has_hard_overflow = self._check_hard_overflow()
         periodic_due = (self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0))
         if has_hard_overflow or (self.step_count % self.config.check_interval == 0) or periodic_due:
             return self._do_full_evaluation()
