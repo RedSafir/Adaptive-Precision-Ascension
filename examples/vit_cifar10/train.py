@@ -21,7 +21,7 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-3, help="Initial learning rate")
     parser.add_argument('--apa_preset', type=str, default='research', choices=['conservative', 'aggressive', 'research'], help="APA config preset")
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
-    parser.add_argument('--fp32_baseline', action='store_true', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
+    parser.add_argument('--fp32_baseline', '--no_apa', action='store_true', dest='fp32_baseline', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
     parser.add_argument('--strict_fp32', action='store_true', help="Force strict IEEE 754 FP32 math (disables TF32 Tensor Cores, slower but exact 23-bit mantissa)")
     parser.add_argument('--no_dynamic_scaling', action='store_true', help="Disable Trick B (Dynamic Amax Delayed Scaling)")
     parser.add_argument('--no_dual_fp8', action='store_true', help="Disable Trick A (forces E4M3 for backward gradients instead of E5M2)")
