@@ -91,13 +91,16 @@ class APAForensicLogger:
         by the total number of escalation events throughout training.
     """
 
-    def __init__(self, forensic_log_file: str) -> None:
+    def __init__(self, forensic_log_file: Optional[str] = None) -> None:
+        if not forensic_log_file:
+            forensic_log_file = "apa_forensic.jsonl"
         self.forensic_log_file = forensic_log_file
         # Ensure parent directory exists up-front so log_forensic_event() never
         # fails silently on the first write.
         try:
-            parent = os.path.dirname(os.path.abspath(forensic_log_file))
-            os.makedirs(parent, exist_ok=True)
+            parent = os.path.dirname(os.path.abspath(self.forensic_log_file))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
         except Exception as e:
             print(f"[APA Forensic] Warning: could not create log directory: {e}")
 

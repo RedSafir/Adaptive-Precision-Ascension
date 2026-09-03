@@ -60,6 +60,15 @@ class APAManager:
         self._register_modules_and_hooks()
 
         if config.enable_forensic_logging:
+            if not config.forensic_log_file:
+                if config.log_file is not None:
+                    base = config.log_file.rsplit('.', 1)
+                    config.forensic_log_file = (
+                        base[0] + '_forensic.jsonl' if len(base) == 2
+                        else config.log_file + '_forensic.jsonl'
+                    )
+                else:
+                    config.forensic_log_file = 'apa_forensic.jsonl'
             self.forensic_logger = APAForensicLogger(config.forensic_log_file)
             self._register_forensic_forward_hooks()
 

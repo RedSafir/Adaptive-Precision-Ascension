@@ -76,12 +76,15 @@ def main():
             'aggressive': APAConfig.aggressive,
             'research': APAConfig.research_default,
         }
-        config = preset_map[args.apa_preset](device=str(device), log_file=args.log_file)
+        config_kwargs = {
+            'device': str(device),
+            'log_file': args.log_file,
+            'enable_forensic_logging': args.forensic,
+            'forensic_capture_argmax_index': args.forensic_argmax,
+        }
+        config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:
             config.fp8_simulation_mode = True
-        if args.forensic:
-            config.enable_forensic_logging = True
-            config.forensic_capture_argmax_index = args.forensic_argmax
             
         model = GPT(vocab_size=vocab_size, block_size=args.block_size, config=config, use_apa=True).to(device)
         apa_manager = APAManager(model, config)
