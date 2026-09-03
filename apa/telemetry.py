@@ -44,9 +44,9 @@ class APAEventLogger:
 
     def _log_event(self, event_data: dict):
         event_data['timestamp'] = datetime.utcnow().isoformat() + "Z"
-        # Events are logged silently to log_file when provided to keep stdout clean
         if self.log_file:
             try:
+                json_str = json.dumps(event_data)
                 os.makedirs(os.path.dirname(os.path.abspath(self.log_file)), exist_ok=True)
                 with open(self.log_file, 'a') as f:
                     f.write(json_str + '\n')
