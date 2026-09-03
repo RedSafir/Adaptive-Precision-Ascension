@@ -77,7 +77,7 @@ class APAConfig:
     use_dual_fp8: bool = True             # Trick A: E4M3 for forward, E5M2 for backward
     scale_min: float = 1e-4
     scale_max: float = 65536.0
-    scale_margin: float = 0.90
+    scale_margin: float = 0.75
 
     # ---------------------------------------------------------------------------
     # Forensic Logging (opt-in, disabled by default)
