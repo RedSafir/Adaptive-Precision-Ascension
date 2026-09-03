@@ -92,18 +92,22 @@ def _update_forensic_role(
         if t.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             t = t.to(torch.float32)
         abs_t = torch.abs(t)
-        forensic_amax[role] = abs_t.max().item()
+        # Keep as GPU scalar tensor asynchronously during training loop.
+        # Synchronous .item() calls on every tensor in every batch stall the GPU
+        # and trigger cudaErrorLaunchTimeout from the Linux X11/display watchdog.
+        # .item() is deferred to escalation time in _capture_forensic_snapshot.
+        forensic_amax[role] = abs_t.max()
         forensic_shape[role] = list(tensor.shape)
 
         if forensic_stats is not None:
-            t_f32 = t.float()
+            t_f32 = t.float() if t.dtype != torch.float32 else t
             forensic_stats[role] = {
-                'mean': t_f32.mean().item(),
-                'std': t_f32.std().item() if t_f32.numel() > 1 else 0.0,
+                'mean': t_f32.mean(),
+                'std': t_f32.std() if t_f32.numel() > 1 else torch.tensor(0.0, device=t.device),
             }
 
         if capture_argmax and forensic_argmax is not None:
-            forensic_argmax[role] = int(abs_t.flatten().argmax().item())
+            forensic_argmax[role] = abs_t.flatten().argmax()
 
 
 class APALinearFunction(torch.autograd.Function):

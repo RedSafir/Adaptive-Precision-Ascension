@@ -176,9 +176,14 @@ class APAManager:
             for module in self.other_modules.values():
                 module.gpu_has_nonfinite.zero_()
 
-        # Forensic: reset execution order to this step's sequence only.
+        # Forensic: reset execution order and per-step role telemetry to avoid memory retention
         if self.config.enable_forensic_logging:
             self._forward_execution_order.clear()
+            for module in self.apa_modules.values():
+                module._forensic_role_amax.clear()
+                module._forensic_last_shape.clear()
+                module._forensic_role_stats.clear()
+                module._forensic_role_argmax.clear()
 
     # ------------------------------------------------------------------
     # Detection helpers
@@ -339,13 +344,21 @@ class APAManager:
             old_level: Precision level before escalation.
             trigger_value: The amax or EMA underflow ratio that triggered it.
         """
-        role_amax = dict(module._forensic_role_amax)  # snapshot (copy)
+        # Unpack GPU scalar tensors to CPU Python floats at escalation time (deferred sync)
+        role_amax = {}
+        for role, val in module._forensic_role_amax.items():
+            if isinstance(val, torch.Tensor):
+                role_amax[role] = float(val.item())
+            elif val is not None:
+                role_amax[role] = float(val)
+            else:
+                role_amax[role] = None
 
         # Determine culprit: role with highest observed amax
         culprit_role = None
         culprit_amax = -1.0
         for role, val in role_amax.items():
-            if val > culprit_amax:
+            if val is not None and val > culprit_amax:
                 culprit_amax = val
                 culprit_role = role
 
@@ -355,15 +368,28 @@ class APAManager:
         # Shape of culprit tensor
         tensor_shape = module._forensic_last_shape.get(culprit_role) if culprit_role else None
 
-        # Per-role stats if enabled
+        # Per-role stats if enabled (convert scalar GPU tensors to float)
         per_role_stats = None
         if self.config.forensic_capture_tensor_stats and module._forensic_role_stats:
-            per_role_stats = {r: module._forensic_role_stats.get(r) for r in _KNOWN_ROLES}
+            per_role_stats = {}
+            for r in _KNOWN_ROLES:
+                st = module._forensic_role_stats.get(r)
+                if isinstance(st, dict):
+                    per_role_stats[r] = {
+                        k: float(v.item()) if isinstance(v, torch.Tensor) else float(v)
+                        for k, v in st.items() if v is not None
+                    }
+                else:
+                    per_role_stats[r] = None
 
         # Argmax index if enabled
         argmax_index = None
         if self.config.forensic_capture_argmax_index and culprit_role:
-            argmax_index = module._forensic_role_argmax.get(culprit_role)
+            raw_idx = module._forensic_role_argmax.get(culprit_role)
+            if isinstance(raw_idx, torch.Tensor):
+                argmax_index = int(raw_idx.item())
+            elif raw_idx is not None:
+                argmax_index = int(raw_idx)
 
         # Preceding module in forward-execution order
         preceding_module = None
