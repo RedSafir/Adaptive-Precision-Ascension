@@ -20,7 +20,23 @@ class APABoundaryCast(nn.Module):
             return x.to(working_dtype)
         return x
 
+_SCALE_CACHE = {}
+
+def _get_scale_one(device):
+    dev_key = str(device)
+    if dev_key not in _SCALE_CACHE:
+        _SCALE_CACHE[dev_key] = torch.tensor(1.0, device=device, dtype=torch.float32)
+    return _SCALE_CACHE[dev_key]
+
+_warned_scaled_mm = False
+
 def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, scale_b: torch.Tensor, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    global _warned_scaled_mm
+    if not a.is_contiguous():
+        a = a.contiguous()
+    if not b.is_contiguous():
+        b = b.contiguous()
+
     m, k = a.shape
     k2, n = b.shape
 
@@ -47,8 +63,10 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
             if isinstance(res, tuple):
                 res = res[0]
             return res[:m, :n]
-        except Exception:
-            # Fallback to simulated FP8 matmul if hardware scaled_mm fails on padded tensor
+        except Exception as e:
+            if not _warned_scaled_mm:
+                print(f"[APA WARN] torch._scaled_mm failed on padded tensor: {e}. Falling back to float32 matmul.")
+                _warned_scaled_mm = True
             return a.to(torch.float32) @ b.to(torch.float32)
     else:
         try:
@@ -56,7 +74,10 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
             if isinstance(res, tuple):
                 return res[0]
             return res
-        except Exception:
+        except Exception as e:
+            if not _warned_scaled_mm:
+                print(f"[APA WARN] torch._scaled_mm failed: {e}. Falling back to float32 matmul.")
+                _warned_scaled_mm = True
             return a.to(torch.float32) @ b.to(torch.float32)
 
 
@@ -172,8 +193,8 @@ class APALinearFunction(torch.autograd.Function):
                 out_2d = _call_scaled_mm(
                     x_2d,
                     weight.t(),
-                    scale_a=torch.tensor(1.0, device=x.device),
-                    scale_b=torch.tensor(1.0, device=weight.device),
+                    scale_a=_get_scale_one(x.device),
+                    scale_b=_get_scale_one(weight.device),
                     out_dtype=torch.float32
                 )
 
@@ -252,8 +273,8 @@ class APALinearFunction(torch.autograd.Function):
                     grad_input_2d = _call_scaled_mm(
                         g_out_2d,
                         w_fp8,
-                        scale_a=torch.tensor(1.0, device=x.device),
-                        scale_b=torch.tensor(1.0, device=weight.device),
+                        scale_a=_get_scale_one(x.device),
+                        scale_b=_get_scale_one(weight.device),
                         out_dtype=torch.float32
                     )
                     grad_input = grad_input_2d.view_as(x)
@@ -261,8 +282,8 @@ class APALinearFunction(torch.autograd.Function):
                     grad_weight_2d = _call_scaled_mm(
                         g_out_2d.t(),
                         x_2d,
-                        scale_a=torch.tensor(1.0, device=x.device),
-                        scale_b=torch.tensor(1.0, device=weight.device),
+                        scale_a=_get_scale_one(x.device),
+                        scale_b=_get_scale_one(weight.device),
                         out_dtype=torch.float32
                     )
                     grad_weight = grad_weight_2d.view_as(weight)

@@ -232,55 +232,66 @@ class APAManager:
         trigger_modules = []
 
         with torch.no_grad():
-            for name, module in self.apa_modules.items():
-                amax_val = module.gpu_amax.item()
-                underflow_val = module.gpu_underflow_ratio.item()
-                has_nonfinite = module.gpu_has_nonfinite.item() > 0
+            if self.apa_modules:
+                mod_items = list(self.apa_modules.items())
+                all_amax = torch.cat([m.gpu_amax for _, m in mod_items]).cpu().tolist()
+                all_underflow = torch.cat([m.gpu_underflow_ratio for _, m in mod_items]).cpu().tolist()
+                all_nonfinite = torch.cat([m.gpu_has_nonfinite for _, m in mod_items]).cpu().tolist()
 
-                if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX[module.level]:
-                    batch_has_overflow = True
-                    trigger_modules.append(name)
-                    trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) and amax_val <= THRESHOLDS_MAX[module.level] else amax_val
-                    self._escalate_module(name, module, 'OVERFLOW', trigger_val)
-                else:
-                    module.ema_underflow_ratio = (self.config.ema_alpha * module.ema_underflow_ratio +
-                                                  (1 - self.config.ema_alpha) * underflow_val)
-                    if module.ema_underflow_ratio > self.config.theta_underflow:
-                        self._escalate_module(name, module, 'SILENT_UNDERFLOW', module.ema_underflow_ratio)
+                for i, (name, module) in enumerate(mod_items):
+                    amax_val = all_amax[i]
+                    underflow_val = all_underflow[i]
+                    has_nonfinite = all_nonfinite[i] > 0
 
-            if self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0):
-                periodic_data = {}
-                for name, module in self.apa_modules.items():
-                    periodic_data[name] = {
-                        "amax": float(module.gpu_amax.item()),
-                        "underflow_ratio": float(module.gpu_underflow_ratio.item()),
-                        "ema_underflow": float(module.ema_underflow_ratio),
-                        "level": module.level,
-                        "threshold_max": THRESHOLDS_MAX.get(module.level, float('inf'))
-                    }
-                self.logger.log_periodic_telemetry(self.step_count, periodic_data)
+                    if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX[module.level]:
+                        batch_has_overflow = True
+                        trigger_modules.append(name)
+                        trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) and amax_val <= THRESHOLDS_MAX[module.level] else amax_val
+                        self._escalate_module(name, module, 'OVERFLOW', trigger_val)
+                    else:
+                        module.ema_underflow_ratio = (self.config.ema_alpha * module.ema_underflow_ratio +
+                                                      (1 - self.config.ema_alpha) * underflow_val)
+                        if module.ema_underflow_ratio > self.config.theta_underflow:
+                            self._escalate_module(name, module, 'SILENT_UNDERFLOW', module.ema_underflow_ratio)
 
-            for name, module in self.apa_modules.items():
-                module.gpu_amax.zero_()
-                module.gpu_underflow_ratio.zero_()
-                module.gpu_has_nonfinite.zero_()
+                if self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0):
+                    periodic_data = {}
+                    for i, (name, module) in enumerate(mod_items):
+                        periodic_data[name] = {
+                            "amax": float(all_amax[i]),
+                            "underflow_ratio": float(all_underflow[i]),
+                            "ema_underflow": float(module.ema_underflow_ratio),
+                            "level": module.level,
+                            "threshold_max": THRESHOLDS_MAX.get(module.level, float('inf'))
+                        }
+                    self.logger.log_periodic_telemetry(self.step_count, periodic_data)
+
+                for _, module in mod_items:
+                    module.gpu_amax.zero_()
+                    module.gpu_underflow_ratio.zero_()
+                    module.gpu_has_nonfinite.zero_()
 
             min_apa_level = min([m.level for m in self.apa_modules.values()]) if self.apa_modules else LEVEL_FP16
 
-            for name, module in self.other_modules.items():
-                amax_val = module.gpu_amax.item()
-                has_nonfinite = module.gpu_has_nonfinite.item() > 0
-                if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX.get(min_apa_level, float('inf')):
-                    batch_has_overflow = True
-                    trigger_modules.append(name)
-                    trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) else amax_val
-                    self.logger.log_escalation(
-                        self.step_count, name, 'NON_PARAMETRIC_OVERFLOW',
-                        min_apa_level, min_apa_level, trigger_val
-                    )
+            if self.other_modules:
+                other_items = list(self.other_modules.items())
+                other_amax = torch.cat([m.gpu_amax for _, m in other_items]).cpu().tolist()
+                other_nonfinite = torch.cat([m.gpu_has_nonfinite for _, m in other_items]).cpu().tolist()
 
-                module.gpu_amax.zero_()
-                module.gpu_has_nonfinite.zero_()
+                for i, (name, module) in enumerate(other_items):
+                    amax_val = other_amax[i]
+                    has_nonfinite = other_nonfinite[i] > 0
+                    if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX.get(min_apa_level, float('inf')):
+                        batch_has_overflow = True
+                        trigger_modules.append(name)
+                        trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) else amax_val
+                        self.logger.log_escalation(
+                            self.step_count, name, 'NON_PARAMETRIC_OVERFLOW',
+                            min_apa_level, min_apa_level, trigger_val
+                        )
+
+                    module.gpu_amax.zero_()
+                    module.gpu_has_nonfinite.zero_()
 
         if batch_has_overflow:
             self.logger.log_skip_batch(self.step_count, 'OVERFLOW_DETECTED', trigger_modules)
