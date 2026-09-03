@@ -243,6 +243,19 @@ class APAManager:
                     if module.ema_underflow_ratio > self.config.theta_underflow:
                         self._escalate_module(name, module, 'SILENT_UNDERFLOW', module.ema_underflow_ratio)
 
+            if self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0):
+                periodic_data = {}
+                for name, module in self.apa_modules.items():
+                    periodic_data[name] = {
+                        "amax": float(module.gpu_amax.item()),
+                        "underflow_ratio": float(module.gpu_underflow_ratio.item()),
+                        "ema_underflow": float(module.ema_underflow_ratio),
+                        "level": module.level,
+                        "threshold_max": THRESHOLDS_MAX.get(module.level, float('inf'))
+                    }
+                self.logger.log_periodic_telemetry(self.step_count, periodic_data)
+
+            for name, module in self.apa_modules.items():
                 module.gpu_amax.zero_()
                 module.gpu_underflow_ratio.zero_()
                 module.gpu_has_nonfinite.zero_()
@@ -397,9 +410,8 @@ class APAManager:
         self.step_count += 1
         self._sync_grads_to_master()
 
-        has_hard_overflow = self._check_hard_overflow()
-
-        if has_hard_overflow or (self.step_count % self.config.check_interval == 0):
+        periodic_due = (self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0))
+        if has_hard_overflow or (self.step_count % self.config.check_interval == 0) or periodic_due:
             return self._do_full_evaluation()
 
         return True

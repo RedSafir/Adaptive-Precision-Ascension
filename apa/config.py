@@ -57,6 +57,8 @@ class APAConfig:
     # you need precise element-level debug info.
     forensic_capture_tensor_stats: bool = True   # capture mean/std alongside amax
     # (cheap extra ops, True by default when forensic mode is on)
+    telemetry_log_interval: int = 0              # Periodic step interval to log per-layer
+    # amax and underflow ratio time series (0 = disabled, e.g. 50 = every 50 steps)
 
     def __post_init__(self):
         if DTYPE_MAP[0] is None:

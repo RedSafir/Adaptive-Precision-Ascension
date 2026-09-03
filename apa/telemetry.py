@@ -74,6 +74,13 @@ class APAEventLogger:
             "trigger_modules": trigger_modules
         })
 
+    def log_periodic_telemetry(self, step: int, telemetry: dict):
+        self._log_event({
+            "event": "periodic_telemetry",
+            "step": step,
+            "telemetry": telemetry
+        })
+
 
 class APAForensicLogger:
     """Writes detailed forensic snapshots to a dedicated JSONL file.
