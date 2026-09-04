@@ -81,16 +81,22 @@ class APAManager:
             if isinstance(module, APALinear):
                 self.apa_modules[name] = module
             elif len(list(module.children())) == 0:
+                params = [p for p in module.parameters() if p.requires_grad]
+                if not params:
+                    continue
                 self.other_modules[name] = module
                 module.register_buffer('gpu_amax', torch.zeros(1, dtype=torch.float32, device=self.config.device), persistent=False)
                 module.register_buffer('gpu_has_nonfinite', torch.zeros(1, dtype=torch.int32, device=self.config.device), persistent=False)
 
-                def hook_fn(mod, grad_input, grad_output):
-                    for g in grad_output:
-                        if g is not None:
-                            track_telemetry_on_tensor(g, mod.gpu_amax, mod.gpu_has_nonfinite)
+                def make_hook(mod):
+                    def _param_hook(grad):
+                        if grad is not None:
+                            track_telemetry_on_tensor(grad, mod.gpu_amax, mod.gpu_has_nonfinite)
+                        return grad
+                    return _param_hook
 
-                module.register_full_backward_hook(hook_fn)
+                for p in params:
+                    p.register_hook(make_hook(module))
 
     def _register_forensic_forward_hooks(self):
         """Register lightweight forward hooks on APALinear modules to record

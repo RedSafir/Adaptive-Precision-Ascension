@@ -557,7 +557,13 @@ class APALinear(nn.Module):
         if self.weight_work is None:
             self.refresh_working_copy()
 
-        x_cast = self.boundary_cast(x)
+        # Boundary cast: cast input according to current precision level
+        if self.level == LEVEL_FP8 and self.config.enable_dynamic_scaling:
+            x_cast = x.to(torch.float32) if x.dtype not in (torch.float32, torch.float16, torch.bfloat16) else x
+        else:
+            w_dtype = self.working_dtype
+            x_cast = x.to(w_dtype) if x.dtype != w_dtype else x
+
 
         # Pass forensic dicts only when forensic mode is on; None otherwise
         # so APALinearFunction fast-paths around all forensic operations.

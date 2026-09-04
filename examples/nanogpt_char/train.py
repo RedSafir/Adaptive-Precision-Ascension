@@ -132,7 +132,11 @@ def main():
     if args.compile:
         print("[PyTorch] Compiling model with torch.compile...")
         torch._dynamo.config.capture_scalar_outputs = True
+        torch._dynamo.config.allow_unspec_int_on_nn_module = True
+        torch._dynamo.config.force_parameter_static_shapes = False
+        torch._dynamo.config.recompile_limit = 128
         model = torch.compile(model)
+
 
     
     # Optimizer
