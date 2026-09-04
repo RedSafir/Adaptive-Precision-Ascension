@@ -12,6 +12,8 @@ from .config import (
     FP8_E4M3_MAX, FP8_E5M2_MAX
 )
 from .telemetry import track_telemetry_on_tensor, compute_underflow_ratio
+from .kernels import fused_scale_clamp_quantize_fp8
+
 
 class APABoundaryCast(nn.Module):
     def __init__(self, parent_linear):
@@ -207,9 +209,9 @@ class APALinearFunction(torch.autograd.Function):
         if level == LEVEL_FP8:
             if config.enable_dynamic_scaling:
                 fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                x_scaled = x * scale_x
-                x_fp8 = torch.clamp(x_scaled, -FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype)
                 w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
+
                 s_a = inv_scale_x
                 s_b = inv_scale_w
             else:
@@ -293,10 +295,12 @@ class APALinearFunction(torch.autograd.Function):
             v_max_bwd = FP8_E5M2_MAX if (config.use_dual_fp8 and bwd_dtype == DTYPE_BACKWARD_MAP[0]) else FP8_E4M3_MAX
 
             if config.enable_dynamic_scaling:
-                g_fp8 = (grad_output.to(torch.float32) * scale_grad).clamp(-v_max_bwd, v_max_bwd).to(bwd_dtype if bwd_dtype is not None else torch.float32)
+                target_bwd = bwd_dtype if bwd_dtype is not None else torch.float32
+                g_fp8 = fused_scale_clamp_quantize_fp8(grad_output, scale_grad, v_max_bwd, target_bwd)
                 s_g = inv_scale_grad
                 s_x = s_a
                 s_w = s_b
+
             else:
                 g_fp8 = grad_output.to(bwd_dtype if bwd_dtype is not None else torch.float32)
                 s_g = _get_scale_one(grad_output.device)
@@ -494,8 +498,9 @@ class APALinear(nn.Module):
             if self.level == LEVEL_FP8:
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    w_scaled = (w_detached * self.scale_w).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fwd_dtype)
+                    w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
                     object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+
                     # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
                     object.__setattr__(self, 'weight_work_t', w_scaled.t())
                     if b_detached is not None:
