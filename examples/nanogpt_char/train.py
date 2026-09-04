@@ -210,8 +210,18 @@ def main():
     total_time = time.time() - start_time
     print("=" * 60)
     print(f"Training Complete! Total Time: {total_time:.2f}s ({args.max_steps/total_time:.1f} steps/s)")
+    if use_apa and apa_manager is not None:
+        precision_names = {0: "FP8", 1: "FP16", 2: "TF32"}
+        counts = {"FP8": 0, "FP16": 0, "TF32": 0}
+        for mod in apa_manager.apa_modules.values():
+            lvl = precision_names.get(mod.level, f"Level_{mod.level}")
+            counts[lvl] = counts.get(lvl, 0) + 1
+        total_layers = len(apa_manager.apa_modules)
+        fp8_pct = (counts['FP8'] / total_layers * 100) if total_layers > 0 else 0
+        print(f"Final Precision : FP8={counts['FP8']} ({fp8_pct:.1f}%), FP16={counts['FP16']}, TF32={counts['TF32']} (Total: {total_layers} layers)")
     print(f"Log saved to: {args.log_file}")
     print("=" * 60)
+
 
 if __name__ == '__main__':
     main()
