@@ -131,7 +131,9 @@ def main():
 
     if args.compile:
         print("[PyTorch] Compiling model with torch.compile...")
+        torch._dynamo.config.capture_scalar_outputs = True
         model = torch.compile(model)
+
     
     # Optimizer
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)

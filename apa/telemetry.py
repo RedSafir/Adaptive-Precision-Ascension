@@ -31,12 +31,16 @@ def compute_underflow_ratio(grad_tensor: torch.Tensor, v_min_threshold: float) -
         non_zero_mask = abs_grad > 0
         non_zero_count = non_zero_mask.sum().to(torch.float32)
         
-        if non_zero_count.item() == 0:
-            return torch.tensor(0.0, device=grad_tensor.device, dtype=torch.float32)
-            
         underflow_mask = (abs_grad < v_min_threshold) & non_zero_mask
         underflow_count = underflow_mask.sum().to(torch.float32)
-        return underflow_count / non_zero_count
+        
+        # Zero CPU-sync / zero graph-break: compute ratio entirely on device
+        return torch.where(
+            non_zero_count > 0,
+            underflow_count / torch.clamp(non_zero_count, min=1.0),
+            torch.zeros_like(non_zero_count)
+        )
+
 
 class APAEventLogger:
     def __init__(self, log_file: Optional[str]):
