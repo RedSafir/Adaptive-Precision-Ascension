@@ -36,10 +36,10 @@ def parse_args():
     parser.add_argument('--dim', type=int, default=256, help="ViT hidden dimension (default: 256, try 384 or 512 for larger GEMMs)")
     parser.add_argument('--depth', type=int, default=6, help="ViT depth / number of transformer blocks (default: 6)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate (default: 1e-3)")
-    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp8_fast', 'fp16', 'tf32', 'apa'],
-                        choices=['fp8', 'fp8_fast', 'fp16', 'tf32', 'fp32', 'apa'],
-                        type=lambda s: s.lower(),
-                        help="Methods to benchmark (default: fp8 fp8_fast fp16 tf32 apa)")
+    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
+                        choices=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
+                        type=lambda s: 'fp8' if s.lower() == 'fp8_fast' else s.lower(),
+                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa)")
     parser.add_argument('--synthetic', action='store_true',
                         help="Use synthetic random data (instant, no CIFAR-10 download needed)")
     parser.add_argument('--data_dir', type=str, default=os.path.join('examples', 'vit_cifar10', 'data'),
@@ -84,7 +84,7 @@ def benchmark_single_method(method, args, data_batches):
     device = torch.device(args.device)
     
     # Configure precision environment
-    fp8_output_dtype = 'float32'
+    fp8_output_dtype = 'float16'
     if method == 'tf32':
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -112,14 +112,8 @@ def benchmark_single_method(method, args, data_batches):
         use_apa = True
         freeze_level = LEVEL_FP8
         use_amp = False
-        fp8_output_dtype = 'float32'
-        backend_desc = "Native FP8 (FP32 Accum)"
-    elif method == 'fp8_fast':
-        use_apa = True
-        freeze_level = LEVEL_FP8
-        use_amp = False
         fp8_output_dtype = 'float16'
-        backend_desc = "Native FP8 (FP16 Accum / Fast SDPA)"
+        backend_desc = "Native FP8 (E4M3/E5M2 Tensor Cores)"
     elif method == 'apa':
         use_apa = True
         freeze_level = None

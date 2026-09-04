@@ -35,10 +35,10 @@ def parse_args():
     parser.add_argument('--block_size', type=int, default=256, help="Context length (default: 256)")
     parser.add_argument('--vocab_size', type=int, default=65, help="Vocabulary size (default: 65)")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate (default: 3e-4)")
-    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'apa'],
+    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
                         choices=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
-                        type=lambda s: s.lower(),
-                        help="Methods to benchmark (default: fp8 fp16 tf32 apa)")
+                        type=lambda s: 'fp8' if s.lower() == 'fp8_fast' else s.lower(),
+                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa)")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help="Device to benchmark on")
     parser.add_argument('--save_json', type=str, default=None,
@@ -86,7 +86,7 @@ def benchmark_single_method(method, args, data_batches):
         use_apa = True
         freeze_level = LEVEL_FP8
         use_amp = False
-        backend_desc = "Native FP8 (FP16 Accum / Fast SDPA)"
+        backend_desc = "Native FP8 (E4M3/E5M2 Tensor Cores)"
     elif method == 'apa':
         use_apa = True
         freeze_level = None

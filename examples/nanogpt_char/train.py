@@ -17,7 +17,7 @@ from model import GPT
 def get_args():
     parser = argparse.ArgumentParser(description="Train nanoGPT on Tiny Shakespeare with APA or pure FP32 baseline.")
     parser.add_argument('--precision', type=lambda s: s.lower(), default=None, choices=['apa', 'fp8', 'fp16', 'tf32', 'fp32'],
-                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton & FP16 Accum), 'fp16' (Mixed Precision AMP), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
+                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton), 'fp16' (Mixed Precision AMP), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
     parser.add_argument('--max_steps', type=int, default=1000, help="Maximum training steps")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
@@ -53,8 +53,8 @@ def main():
     if args.precision == 'fp8':
         use_apa = True
         freeze_level = LEVEL_FP8
-        mode_str = "Pure FP8 (Fixed Level 0 with Native Triton Kernel & FP16 Accum)"
-        math_dtype_str = "FP8 E4M3/E5M2 Tensor Cores (FP16 Accum)"
+        mode_str = "Pure FP8 (Fixed Level 0 with Native Triton Kernel)"
+        math_dtype_str = "FP8 E4M3/E5M2 Tensor Cores"
     elif args.precision == 'fp16':
         use_apa = False
         use_amp = True
