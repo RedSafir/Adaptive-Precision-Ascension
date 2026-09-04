@@ -75,8 +75,16 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
         if pad_k > 0 or pad_n > 0:
             b_padded = torch.zeros((k2 + pad_k, n + pad_n), dtype=b.dtype, device=b.device)
             b_padded[:k2, :n] = b
+            # mat2 must be strictly column-major (stride(0) == 1) for torch._scaled_mm
+            b_padded = b_padded.t().contiguous().t()
         else:
             b_padded = b
+
+        if not a_padded.is_contiguous():
+            a_padded = a_padded.contiguous()
+        if not b_padded.t().is_contiguous():
+            b_padded = b_padded.t().contiguous().t()
+
 
         try:
             res = torch._scaled_mm(a_padded, b_padded, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype)
