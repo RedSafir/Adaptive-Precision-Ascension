@@ -233,17 +233,18 @@ class APALinearFunction(torch.autograd.Function):
                 x_2d = x_fp8.view(-1, x_fp8.shape[-1])
                 w_for_mm = weight_t if weight_t is not None else w_fp8.t().contiguous()
 
+                out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
                 out_2d = _call_scaled_mm(
                     x_2d,
                     w_for_mm,
                     scale_a=s_a,
                     scale_b=s_b,
-                    out_dtype=torch.float32
+                    out_dtype=out_dtype
                 )
 
                 result = out_2d.view(*original_shape[:-1], weight.shape[0])
                 if bias is not None:
-                    result += bias.to(torch.float32)
+                    result += bias.to(out_dtype)
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
             ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite)
@@ -325,13 +326,14 @@ class APALinearFunction(torch.autograd.Function):
                 g_out_2d = g_fp8.reshape(-1, g_fp8.shape[-1])
                 x_2d = x_saved.reshape(-1, x_saved.shape[-1])
 
+                out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
                 if ctx.needs_input_grad[0]:
                     grad_input_2d = _call_scaled_mm(
                         g_out_2d,
                         w_saved,
                         scale_a=s_g,
                         scale_b=s_w,
-                        out_dtype=torch.float32
+                        out_dtype=out_dtype
                     )
                     grad_input = grad_input_2d.view_as(x_saved)
                 if ctx.needs_input_grad[1]:
@@ -355,7 +357,8 @@ class APALinearFunction(torch.autograd.Function):
                 grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).to(torch.float32).sum(dim=0)
 
         if grad_input is not None:
-            grad_input = grad_input.to(torch.float32)
+            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            grad_input = grad_input.to(target_act_dtype)
         if grad_weight is not None:
             grad_weight = grad_weight.to(torch.float32)
             if ctx.is_telemetry_step and update_underflow_metric is not None:
