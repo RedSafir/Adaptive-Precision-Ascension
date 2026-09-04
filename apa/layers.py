@@ -342,18 +342,17 @@ class APALinearFunction(torch.autograd.Function):
                         scale_b=s_x,
                         out_dtype=torch.float32
                     )
-                    grad_weight = grad_weight_2d.view_as(w_saved)
-                if bias is not None and ctx.needs_input_grad[2]:
-                    grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).to(torch.float32).sum(dim=0)
         else:
+            g_out = grad_output.to(w_saved.dtype) if grad_output.dtype != w_saved.dtype else grad_output
             if ctx.needs_input_grad[0]:
-                grad_input = grad_output @ w_saved
+                grad_input = g_out @ w_saved
             if ctx.needs_input_grad[1]:
-                g_out_2d = grad_output.reshape(-1, grad_output.shape[-1])
-                x_2d = x_saved.reshape(-1, x_saved.shape[-1])
+                g_out_2d = g_out.reshape(-1, g_out.shape[-1])
+                x_saved_cast = x_saved.to(w_saved.dtype) if x_saved.dtype != w_saved.dtype else x_saved
+                x_2d = x_saved_cast.reshape(-1, x_saved_cast.shape[-1])
                 grad_weight = g_out_2d.t() @ x_2d
             if bias is not None and ctx.needs_input_grad[2]:
-                grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).to(torch.float32).sum(dim=0)
 
         if grad_input is not None:
             grad_input = grad_input.to(torch.float32)

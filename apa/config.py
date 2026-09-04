@@ -79,6 +79,7 @@ class APAConfig:
     scale_max: float = 65536.0
     scale_margin: float = 0.75
     interval_telemetry: bool = False  # When True, samples telemetry only on check_interval steps
+    freeze_level: Optional[int] = None  # If set (0=FP8, 1=FP16, 2=TF32), fixes precision and disables escalation
 
     # ---------------------------------------------------------------------------
     # Forensic Logging (opt-in, disabled by default)

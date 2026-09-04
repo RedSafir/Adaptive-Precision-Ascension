@@ -59,6 +59,11 @@ class APAManager:
 
         self._register_modules_and_hooks()
 
+        if config.freeze_level is not None:
+            for module in self.apa_modules.values():
+                module.level = config.freeze_level
+                module.refresh_working_copy()
+
         if config.enable_forensic_logging:
             if not config.forensic_log_file:
                 if config.log_file is not None:
@@ -180,6 +185,8 @@ class APAManager:
             # If interval_telemetry is enabled, only sample telemetry on check_interval steps.
             # Default is False (continuous per-step telemetry, exactly as before).
             track_this_step = is_eval_step if self.config.interval_telemetry else True
+            if self.config.freeze_level is not None:
+                track_this_step = False
 
             for module in self.apa_modules.values():
                 module.is_telemetry_step = track_this_step
@@ -337,6 +344,8 @@ class APAManager:
             trigger_value: The amax or EMA underflow ratio that triggered
                 escalation.
         """
+        if self.config.freeze_level is not None:
+            return
         old_level = module.level
         if old_level < LEVEL_TF32:
             module.level += 1
@@ -466,6 +475,9 @@ class APAManager:
     def post_backward_sync_and_eval(self) -> bool:
         self.step_count += 1
         self._sync_grads_to_master()
+
+        if self.config.freeze_level is not None:
+            return True
 
         has_hard_overflow = self._check_hard_overflow()
         periodic_due = (self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0))

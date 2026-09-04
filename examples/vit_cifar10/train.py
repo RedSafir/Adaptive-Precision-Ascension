@@ -16,10 +16,13 @@ warnings.filterwarnings("ignore", message=".*align should be passed as Python or
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 from apa import APAConfig, APAManager
+from apa.config import LEVEL_FP8, LEVEL_FP16, LEVEL_TF32
 from model import VisionTransformer
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train Vision Transformer on CIFAR-10 with APA or pure FP32 baseline.")
+    parser.add_argument('--precision', type=str, default=None, choices=['apa', 'fp8', 'fp16', 'tf32'],
+                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton), 'fp16' (Mixed Precision AMP), or 'tf32' (Standard TF32 FP32)")
     parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size")
     parser.add_argument('--lr', type=float, default=1e-3, help="Initial learning rate")
@@ -41,19 +44,41 @@ def main():
     args = get_args()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    use_apa = not args.fp32_baseline
-    mode_str = "APA (Adaptive Precision)" if use_apa else "Pure FP32 Baseline (No APA)"
+    
+    freeze_level = None
+    use_amp = False
+    if args.precision == 'fp8':
+        use_apa = True
+        freeze_level = LEVEL_FP8
+        mode_str = "Pure FP8 (Fixed Level 0 with Native Triton Kernel)"
+        math_mode = "FP8 E4M3/E5M2 Tensor Cores"
+    elif args.precision == 'fp16':
+        use_apa = False
+        use_amp = True
+        mode_str = "Pure FP16 (Automatic Mixed Precision AMP)"
+        math_mode = "FP16 Half Precision Tensor Cores"
+    elif args.precision == 'tf32':
+        use_apa = False
+        args.strict_fp32 = False
+        mode_str = "Pure TF32 (Standard FP32 with TF32 Tensor Cores)"
+        math_mode = "Standard FP32 (TF32 Tensor Cores Enabled)"
+    elif args.precision == 'apa':
+        use_apa = True
+        mode_str = "APA (Adaptive Precision)"
+        math_mode = "Adaptive (FP8 -> FP16 -> TF32)"
+    else:
+        use_apa = not args.fp32_baseline
+        mode_str = "APA (Adaptive Precision)" if use_apa else "Pure FP32 Baseline (No APA)"
+        math_mode = "Standard FP32 (TF32 Tensor Cores Enabled)" if not args.strict_fp32 else "Strict IEEE 754 Single Precision (TF32 Disabled)"
     
     if args.strict_fp32:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         if hasattr(torch, 'set_float32_matmul_precision'):
             torch.set_float32_matmul_precision('highest')
-        math_mode = "Strict IEEE 754 Single Precision (TF32 Disabled)"
     else:
         if hasattr(torch, 'set_float32_matmul_precision'):
             torch.set_float32_matmul_precision('high')
-        math_mode = "Standard FP32 (TF32 Tensor Cores Enabled)"
     
     print("=" * 60)
     print(f"Vision Transformer CIFAR-10 Training")
@@ -100,6 +125,7 @@ def main():
             'enable_dynamic_scaling': not args.no_dynamic_scaling,
             'use_dual_fp8': not args.no_dual_fp8,
             'interval_telemetry': args.interval_telemetry,
+            'freeze_level': freeze_level,
         }
         config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:
@@ -115,7 +141,8 @@ def main():
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     
-    # Optimizer & Scheduler
+    # Optimizer & Scheduler & Scaler
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.05)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
@@ -145,17 +172,26 @@ def main():
                 apa_manager.pre_step()
                 
             optimizer.zero_grad(set_to_none=True)
-            out = model(x)
-            loss = F.cross_entropy(out, y)
-            loss.backward()
             
-            if apa_manager is not None:
-                if apa_manager.post_backward_sync_and_eval():
-                    optimizer.step()
-                else:
-                    optimizer.zero_grad(set_to_none=True)
+            if use_amp:
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    out = model(x)
+                    loss = F.cross_entropy(out, y)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
             else:
-                optimizer.step()
+                out = model(x)
+                loss = F.cross_entropy(out, y)
+                loss.backward()
+                
+                if apa_manager is not None:
+                    if apa_manager.post_backward_sync_and_eval():
+                        optimizer.step()
+                    else:
+                        optimizer.zero_grad(set_to_none=True)
+                else:
+                    optimizer.step()
                 
             total_loss += loss.item() * x.size(0)
             preds = out.argmax(dim=-1)
@@ -179,7 +215,11 @@ def main():
         with torch.no_grad():
             for x, y in test_loader:
                 x, y = x.to(device), y.to(device)
-                out = model(x)
+                if use_amp:
+                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                        out = model(x)
+                else:
+                    out = model(x)
                 loss = F.cross_entropy(out, y)
                 test_loss += loss.item() * x.size(0)
                 preds = out.argmax(dim=-1)
@@ -190,7 +230,7 @@ def main():
         test_acc = test_correct / test_samples
         
         # Summary & Logging
-        if use_apa:
+        if use_apa and config.freeze_level is None:
             precision_names = {0: "FP8", 1: "FP16", 2: "TF32"}
             layer_precisions = {name: precision_names.get(mod.level, f"Level_{mod.level}") for name, mod in apa_manager.apa_modules.items()}
             counts = {"FP8": 0, "FP16": 0, "TF32": 0}
@@ -225,18 +265,18 @@ def main():
         else:
             print(f"Epoch {epoch+1:3d}/{args.epochs} Summary ({epoch_duration:.1f}s): "
                   f"Train Loss={total_loss/total_samples:.4f} Train Acc={train_acc*100:.2f}% | "
-                  f"Test Loss={test_loss/test_samples:.4f} Test Acc={test_acc*100:.2f}% (FP32 Baseline)")
+                  f"Test Loss={test_loss/test_samples:.4f} Test Acc={test_acc*100:.2f}% ({mode_str})")
                   
             log_data = {
                 "event": "epoch_summary",
                 "epoch": epoch + 1,
-                "mode": "fp32_baseline",
+                "mode": args.precision or ("apa" if use_apa else "fp32_baseline"),
                 "epoch_time_sec": round(epoch_duration, 2),
                 "train_loss": total_loss / total_samples,
                 "train_acc": train_acc,
                 "test_loss": test_loss / test_samples,
                 "test_acc": test_acc,
-                "precision": "FP32_pure"
+                "precision": mode_str
             }
             
         with open(args.log_file, 'a', encoding='utf-8') as f:
