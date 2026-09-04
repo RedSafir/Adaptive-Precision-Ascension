@@ -152,3 +152,32 @@ def get_imagenet100_loaders(
     )
     
     return train_loader, val_loader
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description="Pre-download and verify ImageNet-100 dataset from Hugging Face Hub.")
+    parser.add_argument('--hf_token', type=str, default=None, help="Hugging Face API token")
+    parser.add_argument('--data_dir', type=str, default=None, help="Custom cache directory to save dataset")
+    parser.add_argument('--batch_size', type=int, default=32, help="Test batch size")
+    args = parser.parse_args()
+
+    print("=" * 70)
+    print("📥 Pre-downloading ImageNet-100 from Hugging Face Hub")
+    print("=" * 70)
+    train_loader, val_loader = get_imagenet100_loaders(
+        batch_size=args.batch_size,
+        hf_token=args.hf_token,
+        data_dir=args.data_dir,
+        num_workers=2
+    )
+
+    print("\nVerifying DataLoader batch retrieval...")
+    x, y = next(iter(train_loader))
+    print(f"  -> Sample Batch Image Tensor Shape : {x.shape} (Expected: [{args.batch_size}, 3, 224, 224])")
+    print(f"  -> Sample Batch Target Tensor Shape: {y.shape}")
+    print(f"  -> Label Range in Batch            : [{y.min().item()} .. {y.max().item()}]")
+    print("=" * 70)
+    print("✅ ImageNet-100 dataset downloaded and verified successfully!")
+    print("   You can now start training with: python examples/vit_imagenet100/train.py")
+    print("=" * 70)
+
