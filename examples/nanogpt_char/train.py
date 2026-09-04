@@ -16,8 +16,8 @@ from model import GPT
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train nanoGPT on Tiny Shakespeare with APA or pure FP32 baseline.")
-    parser.add_argument('--precision', type=str, default=None, choices=['apa', 'fp8', 'fp16', 'tf32'],
-                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton & FP16 Accum), 'fp16' (Mixed Precision AMP), or 'tf32' (Standard TF32 FP32)")
+    parser.add_argument('--precision', type=lambda s: s.lower(), default=None, choices=['apa', 'fp8', 'fp16', 'tf32', 'fp32'],
+                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton & FP16 Accum), 'fp16' (Mixed Precision AMP), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
     parser.add_argument('--max_steps', type=int, default=1000, help="Maximum training steps")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
@@ -65,6 +65,11 @@ def main():
         args.strict_fp32 = False
         mode_str = "Pure TF32 (Standard FP32 with TF32 Tensor Cores)"
         math_dtype_str = "Standard FP32 (TF32 Tensor Cores Enabled)"
+    elif args.precision == 'fp32':
+        use_apa = False
+        args.strict_fp32 = True
+        mode_str = "Pure FP32 Baseline (Strict IEEE 754, TF32 Disabled)"
+        math_dtype_str = "Strict IEEE 754 Single Precision (TF32 Disabled)"
     elif args.precision == 'apa':
         use_apa = True
         mode_str = "APA (Adaptive Precision)"
@@ -77,9 +82,13 @@ def main():
     if args.strict_fp32:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('highest')
     else:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('high')
     
     print("=" * 60)
     print(f"nanoGPT Character-Level Language Model Training")

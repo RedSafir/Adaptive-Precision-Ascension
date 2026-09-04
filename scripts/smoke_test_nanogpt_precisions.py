@@ -36,7 +36,8 @@ def parse_args():
     parser.add_argument('--vocab_size', type=int, default=65, help="Vocabulary size (default: 65)")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate (default: 3e-4)")
     parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'apa'],
-                        choices=['fp8', 'fp16', 'tf32', 'apa'],
+                        choices=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
+                        type=lambda s: s.lower(),
                         help="Methods to benchmark (default: fp8 fp16 tf32 apa)")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help="Device to benchmark on")
@@ -61,10 +62,21 @@ def benchmark_single_method(method, args, data_batches):
     if method == 'tf32':
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('high')
         use_apa = False
         freeze_level = None
         use_amp = False
         backend_desc = "TF32 Tensor Cores (Standard FP32)"
+    elif method == 'fp32':
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('highest')
+        use_apa = False
+        freeze_level = None
+        use_amp = False
+        backend_desc = "Strict FP32 (IEEE 754 23-bit, TF32 Off)"
     elif method == 'fp16':
         use_apa = False
         freeze_level = None
@@ -116,7 +128,10 @@ def benchmark_single_method(method, args, data_batches):
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if hasattr(torch.amp, 'GradScaler'):
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
     model.train()
 
@@ -266,8 +281,10 @@ def main():
         print(f"    -> Peak VRAM : {res['peak_vram_mb']} MB")
         print(f"    -> Loss      : {res['initial_loss']} -> {res['final_loss']}\n")
 
-    # Determine baseline for speedup calculation (TF32 if present, else first method)
+    # Determine baseline for speedup calculation (TF32 if present, else FP32, else last method)
     tf32_ms = next((r['ms_per_step'] for r in results if r['method'] == 'TF32'), None)
+    if tf32_ms is None:
+        tf32_ms = next((r['ms_per_step'] for r in results if r['method'] == 'FP32'), None)
     if tf32_ms is None and len(results) > 0:
         tf32_ms = results[-1]['ms_per_step']
 
