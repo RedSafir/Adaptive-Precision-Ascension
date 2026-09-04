@@ -11,10 +11,13 @@ import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 from apa import APAConfig, APAManager
+from apa.config import LEVEL_FP8, LEVEL_FP16, LEVEL_TF32
 from model import GPT
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train nanoGPT on Tiny Shakespeare with APA or pure FP32 baseline.")
+    parser.add_argument('--precision', type=str, default=None, choices=['apa', 'fp8', 'fp16', 'tf32'],
+                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton & FP16 Accum), 'fp16' (Mixed Precision AMP), or 'tf32' (Standard TF32 FP32)")
     parser.add_argument('--max_steps', type=int, default=1000, help="Maximum training steps")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
@@ -44,17 +47,39 @@ def main():
     args = get_args()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    use_apa = not args.fp32_baseline
-    mode_str = "APA (Adaptive Precision)" if use_apa else "Pure FP32 Baseline (No APA)"
+    
+    freeze_level = None
+    use_amp = False
+    if args.precision == 'fp8':
+        use_apa = True
+        freeze_level = LEVEL_FP8
+        mode_str = "Pure FP8 (Fixed Level 0 with Native Triton Kernel & FP16 Accum)"
+        math_dtype_str = "FP8 E4M3/E5M2 Tensor Cores (FP16 Accum)"
+    elif args.precision == 'fp16':
+        use_apa = False
+        use_amp = True
+        mode_str = "Pure FP16 (Automatic Mixed Precision AMP)"
+        math_dtype_str = "FP16 Half Precision Tensor Cores"
+    elif args.precision == 'tf32':
+        use_apa = False
+        args.strict_fp32 = False
+        mode_str = "Pure TF32 (Standard FP32 with TF32 Tensor Cores)"
+        math_dtype_str = "Standard FP32 (TF32 Tensor Cores Enabled)"
+    elif args.precision == 'apa':
+        use_apa = True
+        mode_str = "APA (Adaptive Precision)"
+        math_dtype_str = "Adaptive (FP8 -> FP16 -> TF32)"
+    else:
+        use_apa = not args.fp32_baseline
+        mode_str = "APA (Adaptive Precision)" if use_apa else "Pure FP32 Baseline (No APA)"
+        math_dtype_str = "Standard FP32 (TF32 Tensor Cores Enabled)" if not args.strict_fp32 else "Strict IEEE 754 Single Precision"
     
     if args.strict_fp32:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
-        math_dtype_str = "Strict IEEE 754 Single Precision (TF32 Disabled)"
     else:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        math_dtype_str = "Standard FP32 (TF32 Tensor Cores Enabled)"
     
     print("=" * 60)
     print(f"nanoGPT Character-Level Language Model Training")
@@ -99,6 +124,7 @@ def main():
             'enable_forensic_logging': args.forensic,
             'forensic_capture_argmax_index': args.forensic_argmax,
             'interval_telemetry': args.interval_telemetry,
+            'freeze_level': freeze_level,
         }
         config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:
@@ -145,12 +171,13 @@ def main():
 
 
     
-    # Optimizer
+    # Optimizer & Scaler
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
     
     with open(args.log_file, 'w', encoding='utf-8') as f:
         header_data = {
-            "mode": "apa" if use_apa else "fp32_baseline",
+            "mode": args.precision or ("apa" if use_apa else "fp32_baseline"),
             "args": vars(args),
             "config": config.__dict__ if config is not None else {"precision": "FP32"}
         }
@@ -167,17 +194,26 @@ def main():
             apa_manager.pre_step()
             
         optimizer.zero_grad(set_to_none=True)
-        logits = model(x)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        loss.backward()
         
-        if apa_manager is not None:
-            if apa_manager.post_backward_sync_and_eval():
-                optimizer.step()
-            else:
-                optimizer.zero_grad(set_to_none=True)
+        if use_amp:
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                logits = model(x)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            optimizer.step()
+            logits = model(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            loss.backward()
+            
+            if apa_manager is not None:
+                if apa_manager.post_backward_sync_and_eval():
+                    optimizer.step()
+                else:
+                    optimizer.zero_grad(set_to_none=True)
+            else:
+                optimizer.step()
             
         if step % 50 == 0:
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
