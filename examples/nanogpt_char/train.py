@@ -135,7 +135,13 @@ def main():
         torch._dynamo.config.allow_unspec_int_on_nn_module = True
         torch._dynamo.config.force_parameter_static_shapes = False
         torch._dynamo.config.recompile_limit = 128
+        try:
+            import torch._inductor.config as inductor_config
+            inductor_config.compile_threads = 8
+        except Exception:
+            pass
         model = torch.compile(model)
+
 
 
     
