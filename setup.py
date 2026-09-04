@@ -10,6 +10,9 @@ setup(
         'examples': [
             'torchvision>=0.15.0',
             'tqdm',
+            'datasets',
+            'huggingface_hub',
+            'pillow',
         ],
     },
     description='Adaptive Precision Ascension — Reckless-start FP8 training with dynamic precision escalation for PyTorch',

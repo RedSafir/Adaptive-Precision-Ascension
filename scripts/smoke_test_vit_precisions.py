@@ -35,6 +35,9 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size (default: 128)")
     parser.add_argument('--dim', type=int, default=256, help="ViT hidden dimension (default: 256, try 384 or 512 for larger GEMMs)")
     parser.add_argument('--depth', type=int, default=6, help="ViT depth / number of transformer blocks (default: 6)")
+    parser.add_argument('--image_size', type=int, default=32, help="Input image resolution (default: 32, try 224 for ImageNet scale)")
+    parser.add_argument('--patch_size', type=int, default=4, help="Patch size (default: 4 for CIFAR, 16 for ImageNet)")
+    parser.add_argument('--num_classes', type=int, default=10, help="Number of output classes (default: 10, 100 for ImageNet-100)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate (default: 1e-3)")
     parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
                         choices=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
@@ -54,18 +57,20 @@ def get_data_loader(args):
     """Returns a data iterator yielding (x, y) batches."""
     if args.synthetic or not torch.cuda.is_available():
         class SyntheticDataset:
-            def __init__(self, count, batch_size):
+            def __init__(self, count, batch_size, image_size, num_classes):
                 self.count = count
                 self.batch_size = batch_size
+                self.image_size = image_size
+                self.num_classes = num_classes
             def __iter__(self):
                 for _ in range(self.count):
-                    x = torch.randn(self.batch_size, 3, 32, 32)
-                    y = torch.randint(0, 10, (self.batch_size,))
+                    x = torch.randn(self.batch_size, 3, self.image_size, self.image_size)
+                    y = torch.randint(0, self.num_classes, (self.batch_size,))
                     yield x, y
             def __len__(self):
                 return self.count
         total_batches = args.warmup + args.steps + 10
-        return SyntheticDataset(total_batches, args.batch_size)
+        return SyntheticDataset(total_batches, args.batch_size, args.image_size, args.num_classes)
     else:
         from torchvision import datasets, transforms
         from torch.utils.data import DataLoader
@@ -132,6 +137,9 @@ def benchmark_single_method(method, args, data_batches):
             fp8_output_dtype=fp8_output_dtype
         )
         model = VisionTransformer(
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            num_classes=args.num_classes,
             config=config, use_apa=True, preserve_critical_layers=True,
             dim=args.dim, depth=args.depth, mlp_dim=args.dim * 2
         ).to(device)
@@ -140,6 +148,9 @@ def benchmark_single_method(method, args, data_batches):
     else:
         config = None
         model = VisionTransformer(
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            num_classes=args.num_classes,
             config=None, use_apa=False,
             dim=args.dim, depth=args.depth, mlp_dim=args.dim * 2
         ).to(device)
