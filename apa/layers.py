@@ -265,49 +265,50 @@ class APALinearFunction(torch.autograd.Function):
 
                 w_bwd_saved = weight_bwd if weight_bwd is not None else weight.t().contiguous().t()
                 ctx.save_for_backward(x_fp8, w_bwd_saved, bias, inv_scale_x, inv_scale_w, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
-            elif config.enable_dynamic_scaling:
-                fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype, gpu_amax=(gpu_amax if is_telemetry_step else None))
-                w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
-
-                s_a = inv_scale_x
-                s_b = inv_scale_w
             else:
-                x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
-                w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else weight
-                s_a = _get_scale_one(x.device)
-                s_b = _get_scale_one(weight.device)
-
-            if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
-                ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
                 if config.enable_dynamic_scaling:
-                    result = F.linear(x_fp8.float() * s_a, w_fp8.float() * s_b, bias.float() if bias is not None else None)
+                    fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
+                    x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype, gpu_amax=(gpu_amax if is_telemetry_step else None))
+                    w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
+
+                    s_a = inv_scale_x
+                    s_b = inv_scale_w
                 else:
-                    result = F.linear(x_fp8.float(), w_fp8.float(), bias.float() if bias is not None else None)
-            else:
-                original_shape = x.shape
-                x_2d = x_fp8.view(-1, x_fp8.shape[-1])
-                w_for_mm = weight_t if weight_t is not None else w_fp8.t().contiguous()
+                    x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
+                    w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else weight
+                    s_a = _get_scale_one(x.device)
+                    s_b = _get_scale_one(weight.device)
 
-                out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
-                bias_fwd = bias.to(out_dtype) if bias is not None else None
-                out_2d = _call_scaled_mm(
-                    x_2d,
-                    w_for_mm,
-                    scale_a=s_a,
-                    scale_b=s_b,
-                    bias=bias_fwd,
-                    out_dtype=out_dtype
-                )
+                if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
+                    ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+                    if config.enable_dynamic_scaling:
+                        result = F.linear(x_fp8.float() * s_a, w_fp8.float() * s_b, bias.float() if bias is not None else None)
+                    else:
+                        result = F.linear(x_fp8.float(), w_fp8.float(), bias.float() if bias is not None else None)
+                else:
+                    original_shape = x.shape
+                    x_2d = x_fp8.view(-1, x_fp8.shape[-1])
+                    w_for_mm = weight_t if weight_t is not None else w_fp8.t().contiguous()
 
-                result = out_2d.view(*original_shape[:-1], weight.shape[0])
+                    out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+                    bias_fwd = bias.to(out_dtype) if bias is not None else None
+                    out_2d = _call_scaled_mm(
+                        x_2d,
+                        w_for_mm,
+                        scale_a=s_a,
+                        scale_b=s_b,
+                        bias=bias_fwd,
+                        out_dtype=out_dtype
+                    )
 
-                # Pre-format tensors for zero-redundancy, zero-copy backward pass:
-                # 1. w_bwd_saved: column-major weight for grad_input (dX = dY @ W)
-                w_bwd_saved = weight_bwd if weight_bwd is not None else w_fp8.t().contiguous().t()
-                # 2. x_saved_bwd: activation saved for grad_weight (dX = dY.t() @ X -> X column-major)
-                x_saved_bwd = x_2d.t().contiguous().t()
-                ctx.save_for_backward(x_saved_bwd, w_bwd_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+                    result = out_2d.view(*original_shape[:-1], weight.shape[0])
+
+                    # Pre-format tensors for zero-redundancy, zero-copy backward pass:
+                    # 1. w_bwd_saved: column-major weight for grad_input (dX = dY @ W)
+                    w_bwd_saved = weight_bwd if weight_bwd is not None else w_fp8.t().contiguous().t()
+                    # 2. x_saved_bwd: activation saved for grad_weight (dX = dY.t() @ X -> X column-major)
+                    x_saved_bwd = x_2d.t().contiguous().t()
+                    ctx.save_for_backward(x_saved_bwd, w_bwd_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
             ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
@@ -382,60 +383,60 @@ class APALinearFunction(torch.autograd.Function):
                 bwd_dtype = working_bwd_dtype
                 v_max_bwd = FP8_E5M2_MAX if (config.use_dual_fp8 and bwd_dtype == DTYPE_BACKWARD_MAP[0]) else FP8_E4M3_MAX
 
-            if config.enable_dynamic_scaling:
-                target_bwd = bwd_dtype if bwd_dtype is not None else torch.float32
-                g_fp8 = fused_scale_clamp_quantize_fp8(grad_output, scale_grad, v_max_bwd, target_bwd, gpu_amax=(gpu_amax if ctx.is_telemetry_step else None))
-                s_g = inv_scale_grad
-                s_x = s_a
-                s_w = s_b
-            else:
-                g_fp8 = grad_output.to(bwd_dtype if bwd_dtype is not None else torch.float32)
-                s_g = _get_scale_one(grad_output.device)
-                s_x = _get_scale_one(x_saved.device)
-                s_w = _get_scale_one(w_saved.device)
+                if config.enable_dynamic_scaling:
+                    target_bwd = bwd_dtype if bwd_dtype is not None else torch.float32
+                    g_fp8 = fused_scale_clamp_quantize_fp8(grad_output, scale_grad, v_max_bwd, target_bwd, gpu_amax=(gpu_amax if ctx.is_telemetry_step else None))
+                    s_g = inv_scale_grad
+                    s_x = s_a
+                    s_w = s_b
+                else:
+                    g_fp8 = grad_output.to(bwd_dtype if bwd_dtype is not None else torch.float32)
+                    s_g = _get_scale_one(grad_output.device)
+                    s_x = _get_scale_one(x_saved.device)
+                    s_w = _get_scale_one(w_saved.device)
 
-            if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
-                g_out_f32 = g_fp8.float() * s_g if config.enable_dynamic_scaling else g_fp8.float()
-                x_f32 = x_saved.float() * s_x if config.enable_dynamic_scaling else x_saved.float()
-                w_f32 = w_saved.float() * s_w if config.enable_dynamic_scaling else w_saved.float()
+                if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
+                    g_out_f32 = g_fp8.float() * s_g if config.enable_dynamic_scaling else g_fp8.float()
+                    x_f32 = x_saved.float() * s_x if config.enable_dynamic_scaling else x_saved.float()
+                    w_f32 = w_saved.float() * s_w if config.enable_dynamic_scaling else w_saved.float()
 
-                if ctx.needs_input_grad[0]:
-                    grad_input = (g_out_f32 @ w_f32).view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else (g_out_f32 @ w_f32).view_as(x_saved)
-                if ctx.needs_input_grad[1]:
-                    g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
-                    x_2d = x_f32.reshape(-1, x_f32.shape[-1])
-                    grad_weight = g_out_2d.t() @ x_2d
-                if bias is not None and ctx.needs_input_grad[2]:
-                    g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
-                    grad_bias = g_out_2d.sum(dim=0)
-            else:
-                g_out_2d = g_fp8.reshape(-1, g_fp8.shape[-1])
+                    if ctx.needs_input_grad[0]:
+                        grad_input = (g_out_f32 @ w_f32).view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else (g_out_f32 @ w_f32).view_as(x_saved)
+                    if ctx.needs_input_grad[1]:
+                        g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
+                        x_2d = x_f32.reshape(-1, x_f32.shape[-1])
+                        grad_weight = g_out_2d.t() @ x_2d
+                    if bias is not None and ctx.needs_input_grad[2]:
+                        g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
+                        grad_bias = g_out_2d.sum(dim=0)
+                else:
+                    g_out_2d = g_fp8.reshape(-1, g_fp8.shape[-1])
 
-                out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
-                if ctx.needs_input_grad[0]:
-                    # Zero-copy fast-path: g_out_2d is row-major, w_saved is pre-transposed column-major
-                    grad_input_2d = _call_scaled_mm(
-                        g_out_2d,
-                        w_saved,
-                        scale_a=s_g,
-                        scale_b=s_w,
-                        out_dtype=out_dtype
-                    )
-                    grad_input = grad_input_2d.view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else grad_input_2d.view_as(x_saved)
-                if ctx.needs_input_grad[1]:
-                    # Transpose to [N, M] row-major for scaled_mm
-                    g_out_2d_t = g_out_2d.t().contiguous()
-                    # grad_weight = g_out_2d_t [N, M] @ x_saved [M, K]
-                    grad_weight = _call_scaled_mm(
-                        g_out_2d_t,
-                        x_saved,
-                        scale_a=s_g,
-                        scale_b=s_x,
-                        out_dtype=torch.float32
-                    )
-                if bias is not None and ctx.needs_input_grad[2]:
-                    # Avoid 1.85 GB allocations per step by summing directly with dtype=float32
-                    grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).sum(dim=0, dtype=torch.float32)
+                    out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+                    if ctx.needs_input_grad[0]:
+                        # Zero-copy fast-path: g_out_2d is row-major, w_saved is pre-transposed column-major
+                        grad_input_2d = _call_scaled_mm(
+                            g_out_2d,
+                            w_saved,
+                            scale_a=s_g,
+                            scale_b=s_w,
+                            out_dtype=out_dtype
+                        )
+                        grad_input = grad_input_2d.view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else grad_input_2d.view_as(x_saved)
+                    if ctx.needs_input_grad[1]:
+                        # Transpose to [N, M] row-major for scaled_mm
+                        g_out_2d_t = g_out_2d.t().contiguous()
+                        # grad_weight = g_out_2d_t [N, M] @ x_saved [M, K]
+                        grad_weight = _call_scaled_mm(
+                            g_out_2d_t,
+                            x_saved,
+                            scale_a=s_g,
+                            scale_b=s_x,
+                            out_dtype=torch.float32
+                        )
+                    if bias is not None and ctx.needs_input_grad[2]:
+                        # Avoid 1.85 GB allocations per step by summing directly with dtype=float32
+                        grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).sum(dim=0, dtype=torch.float32)
         else:
             g_out = grad_output.to(w_saved.dtype) if grad_output.dtype != w_saved.dtype else grad_output
             if ctx.needs_input_grad[0]:
