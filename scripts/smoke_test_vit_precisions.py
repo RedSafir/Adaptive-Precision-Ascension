@@ -40,9 +40,9 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=10, help="Number of output classes (default: 10, 100 for ImageNet-100)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate (default: 1e-3)")
     parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
-                        choices=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
+                        choices=['fp8', 'fp16', 'fp16_apa', 'tf32', 'fp32', 'apa'],
                         type=lambda s: 'fp8' if s.lower() == 'fp8_fast' else s.lower(),
-                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa)")
+                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa, can include fp16_apa)")
     parser.add_argument('--synthetic', action='store_true',
                         help="Use synthetic random data (instant, no CIFAR-10 download needed)")
     parser.add_argument('--data_dir', type=str, default=os.path.join('examples', 'vit_cifar10', 'data'),
@@ -115,6 +115,12 @@ def benchmark_single_method(method, args, data_batches):
         freeze_level = None
         use_amp = True
         backend_desc = "PyTorch AMP FP16 Tensor Cores"
+    elif method == 'fp16_apa':
+        use_apa = True
+        freeze_level = LEVEL_FP16
+        use_amp = False
+        fp8_output_dtype = 'float16'
+        backend_desc = "Controlled FP16 (APALinear Level 1)"
     elif method == 'fp8':
         use_apa = True
         freeze_level = LEVEL_FP8

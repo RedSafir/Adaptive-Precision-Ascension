@@ -21,8 +21,8 @@ from model import VisionTransformer
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train Vision Transformer on CIFAR-10 with APA or pure FP32 baseline.")
-    parser.add_argument('--precision', type=lambda s: s.lower(), default=None, choices=['apa', 'fp8', 'fp16', 'tf32', 'fp32'],
-                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton), 'fp16' (Mixed Precision AMP), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
+    parser.add_argument('--precision', type=lambda s: s.lower(), default=None, choices=['apa', 'fp8', 'fp16', 'fp16_apa', 'tf32', 'fp32'],
+                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton), 'fp16' (Mixed Precision AMP), 'fp16_apa' (Controlled FP16 via APALinear), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
     parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size")
     parser.add_argument('--lr', type=float, default=1e-3, help="Initial learning rate")
@@ -53,6 +53,11 @@ def main():
         freeze_level = LEVEL_FP8
         mode_str = "Pure FP8 (Fixed Level 0 with Native Triton Kernel)"
         math_mode = "FP8 E4M3/E5M2 Tensor Cores"
+    elif args.precision == 'fp16_apa':
+        use_apa = True
+        freeze_level = LEVEL_FP16
+        mode_str = "Controlled FP16 (APALinear Level 1, Isolated Bit-Width Benchmark)"
+        math_mode = "FP16 Half Precision via APALinear"
     elif args.precision == 'fp16':
         use_apa = False
         use_amp = True
