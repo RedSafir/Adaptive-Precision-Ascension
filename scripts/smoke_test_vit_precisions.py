@@ -92,11 +92,13 @@ def benchmark_single_method(method, args, data_batches):
     
     # Configure precision environment
     fp8_output_dtype = 'float16'
-    if method == 'tf32':
+    if device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         if hasattr(torch, 'set_float32_matmul_precision'):
             torch.set_float32_matmul_precision('high')
+
+    if method == 'tf32':
         use_apa = False
         freeze_level = None
         use_amp = False
