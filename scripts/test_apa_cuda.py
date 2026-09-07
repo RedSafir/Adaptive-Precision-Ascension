@@ -151,16 +151,6 @@ def main():
         assert g_b.shape == bias.shape, f"Grad bias shape salah: {g_b.shape}"
         print(" [PASS]")
 
-        # Test Dual Quantization
-        print("[6/6] Menguji Dual Quantize E4M3 & E5M2 (Simultaneous Transpose)...", end="", flush=True)
-        if hasattr(apa_cuda, 'fused_quantize_fp8_dual_e4m3'):
-            d_row, d_t = apa_cuda.fused_quantize_fp8_dual_e4m3(x_3d.view(-1, D), scale_x, 448.0, None)
-            assert d_row.shape == (B * S, D), f"Dual row shape salah: {d_row.shape}"
-            assert d_t.shape == (D, B * S), f"Dual t shape salah: {d_t.shape}"
-            assert d_t.t().stride(0) == 1, "Dual t transpose harus column-major (stride(0) == 1)"
-            print(" [PASS]")
-        else:
-            print(" [SKIP]")
 
         # Micro-benchmark Fused Forward & Backward
         for _ in range(20):

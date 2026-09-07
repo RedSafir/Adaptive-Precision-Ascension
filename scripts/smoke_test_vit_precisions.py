@@ -229,6 +229,14 @@ def benchmark_single_method(method, args, data_batches):
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+        elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                out = model(x)
+                loss = F.cross_entropy(out, y)
+            loss.backward()
+            if apa_manager is not None:
+                apa_manager.post_backward_sync_and_eval()
+            optimizer.step()
         else:
             out = model(x)
             loss = F.cross_entropy(out, y)
@@ -271,6 +279,14 @@ def benchmark_single_method(method, args, data_batches):
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+        elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                out = model(x)
+                loss = F.cross_entropy(out, y)
+            loss.backward()
+            if apa_manager is not None:
+                apa_manager.post_backward_sync_and_eval()
+            optimizer.step()
         else:
             out = model(x)
             loss = F.cross_entropy(out, y)

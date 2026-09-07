@@ -602,19 +602,13 @@ class APALinear(nn.Module):
             if self.level == LEVEL_FP8:
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    if APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_quantize_fp8_dual_e4m3') and w_detached.is_cuda and not self.config.fp8_simulation_mode:
-                        # Zero-copy Dual Quantization in C++/CUDA (simultaneous row-major and column-major format)
-                        w_row, w_t = apa_cuda.fused_quantize_fp8_dual_e4m3(w_detached, self.scale_w, FP8_E4M3_MAX, None)
-                        object.__setattr__(self, 'weight_work', w_row.requires_grad_(self.weight_master.requires_grad))
-                        # w_row.t() has shape [K, N] with stride(0) == 1 (column-major) for forward scaled_mm
-                        object.__setattr__(self, 'weight_work_t', w_row.t())
-                        # w_t is [K, N] row-major -> w_t.t() is [N, K] with stride(0) == 1 (column-major) for backward dX! ZERO COPY!
-                        object.__setattr__(self, 'weight_work_bwd', w_t.t())
-                    else:
-                        w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
-                        object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
-                        object.__setattr__(self, 'weight_work_t', w_scaled.t())
-                        object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
+                    w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
+                    object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+
+                    # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
+                    object.__setattr__(self, 'weight_work_t', w_scaled.t())
+                    # Pre-transpose to column-major layout for backward pass grad_input (dX = dY @ W)
+                    object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
