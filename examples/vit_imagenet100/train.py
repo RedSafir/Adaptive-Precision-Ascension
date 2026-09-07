@@ -76,8 +76,8 @@ def parse_args():
                         help="Output JSONL log file (default: apa_vit_imagenet100_log.jsonl)")
     parser.add_argument('--resume', type=str, default=None,
                         help="Path to checkpoint (.pt) to resume training from")
-    parser.add_argument('--no_save_checkpoint', action='store_true',
-                        help="Disable automatic checkpoint saving")
+    parser.add_argument('--save_checkpoint', action='store_true',
+                        help="Save model checkpoints (_best.pt and _last.pt). Disabled by default to save disk space.")
     parser.add_argument('--show_all_layers', action='store_true',
                         help="Print precision status for every individual layer at each epoch summary")
     
@@ -427,8 +427,8 @@ def main():
         with open(args.log_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(epoch_record) + '\n')
 
-        # 7. Auto-save checkpoints
-        if not args.no_save_checkpoint:
+        # 7. Checkpoints saving (disabled by default, opt-in via --save_checkpoint)
+        if args.save_checkpoint:
             ckpt_base = args.log_file.rsplit('.', 1)[0]
             last_ckpt_path = f"{ckpt_base}_last.pt"
             best_ckpt_path = f"{ckpt_base}_best.pt"
