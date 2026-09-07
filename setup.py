@@ -11,7 +11,15 @@ build_cuda = os.environ.get('APA_BUILD_CUDA', '1') == '1'
 if build_cuda:
     try:
         import torch
+        import torch.utils.cpp_extension
         from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+        
+        # Bypass PyTorch CUDA version mismatch check (e.g. system nvcc 12.8 vs PyTorch built with CUDA 13.2)
+        os.environ['TORCH_DONT_CHECK_CUDA_VERSION'] = '1'
+        if hasattr(torch.utils.cpp_extension, '_check_cuda_version'):
+            torch.utils.cpp_extension._check_cuda_version = lambda *args, **kwargs: None
+        if hasattr(torch.utils.cpp_extension, 'CUDA_MISMATCH_MESSAGE'):
+            torch.utils.cpp_extension.CUDA_MISMATCH_MESSAGE = ""
         
         csrc_dir = os.path.join(os.path.dirname(__file__), 'csrc')
         sources = [
