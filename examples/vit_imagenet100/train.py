@@ -20,6 +20,7 @@ Usage:
 import os
 import sys
 import time
+import math
 import json
 import argparse
 import torch
@@ -73,6 +74,10 @@ def parse_args():
                         help="Periodic step interval to log per-layer telemetry time series")
     parser.add_argument('--log_file', type=str, default='apa_vit_imagenet100_log.jsonl',
                         help="Output JSONL log file (default: apa_vit_imagenet100_log.jsonl)")
+    parser.add_argument('--resume', type=str, default=None,
+                        help="Path to checkpoint (.pt) to resume training from")
+    parser.add_argument('--no_save_checkpoint', action='store_true',
+                        help="Disable automatic checkpoint saving")
     
     return parser.parse_args()
 
@@ -223,10 +228,25 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # 4. Training Loop
+    log_dir = os.path.dirname(args.log_file)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+    # 4. Resume & Training Loop
+    start_epoch = 0
     best_top1_acc = 0.0
 
-    for epoch in range(args.epochs):
+    if args.resume and os.path.exists(args.resume):
+        print(f"Resuming training from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch']
+        best_top1_acc = checkpoint.get('best_top1_acc', 0.0)
+        print(f"  -> Resumed at Epoch {start_epoch + 1}/{args.epochs} (Previous Best Val Top-1: {best_top1_acc:.2f}%)\n")
+
+    for epoch in range(start_epoch, args.epochs):
         epoch_start = time.perf_counter()
         model.train()
         total_train_loss = 0.0
@@ -343,6 +363,25 @@ def main():
         }
         with open(args.log_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(epoch_record) + '\n')
+
+        # 7. Auto-save checkpoints
+        if not args.no_save_checkpoint:
+            ckpt_base = args.log_file.rsplit('.', 1)[0]
+            last_ckpt_path = f"{ckpt_base}_last.pt"
+            best_ckpt_path = f"{ckpt_base}_best.pt"
+            
+            ckpt_payload = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_top1_acc': best_top1_acc,
+                'precision': args.precision,
+                'model_size': args.model_size
+            }
+            torch.save(ckpt_payload, last_ckpt_path)
+            if val_top1_avg >= best_top1_acc:
+                torch.save(ckpt_payload, best_ckpt_path)
 
     print("=" * 75)
     print(f"🎉 Training Completed. Best Val Top-1 Accuracy: {best_top1_acc:.2f}%")
