@@ -80,6 +80,8 @@ def parse_args():
                         help="Save model checkpoints (_best.pt and _last.pt). Disabled by default to save disk space.")
     parser.add_argument('--show_all_layers', action='store_true',
                         help="Print precision status for every individual layer at each epoch summary")
+    parser.add_argument('--compile', action='store_true',
+                        help="Compile model with torch.compile(backend='inductor') for fused kernel execution")
     
     return parser.parse_args()
 
@@ -212,6 +214,14 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model Parameters: {total_params:,} ({total_params / 1e6:.2f}M params)\n")
+
+    if getattr(args, 'compile', False):
+        if hasattr(torch, 'compile'):
+            print("Compiling model via torch.compile(backend='inductor')...", end="", flush=True)
+            model = torch.compile(model)
+            print(" Done.\n")
+        else:
+            print("[WARN: torch.compile not available in this PyTorch version]\n")
 
     # 3. Optimizer & Scaler & LR Scheduler
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)

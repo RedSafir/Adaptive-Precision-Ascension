@@ -49,6 +49,8 @@ def parse_args():
                         help="Path to CIFAR-10 dataset (used if not --synthetic)")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help="Device to benchmark on")
+    parser.add_argument('--compile', action='store_true',
+                        help="Compile model with torch.compile(backend='inductor') for maximum kernel fusion")
     parser.add_argument('--save_json', type=str, default=None,
                         help="Optional path to save benchmark metrics as JSON")
     return parser.parse_args()
@@ -156,6 +158,14 @@ def benchmark_single_method(method, args, data_batches):
         ).to(device)
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+    if getattr(args, 'compile', False):
+        if hasattr(torch, 'compile'):
+            print("  [Compiling model via torch.compile(backend='inductor')]...", end="", flush=True)
+            model = torch.compile(model)
+            print(" Done.")
+        else:
+            print("  [WARN: torch.compile not available in this PyTorch version]")
 
     if hasattr(torch.amp, 'GradScaler'):
         scaler = torch.amp.GradScaler('cuda', enabled=use_amp)

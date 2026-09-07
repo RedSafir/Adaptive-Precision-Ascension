@@ -52,15 +52,26 @@ _warned_scaled_mm = False
 
 def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, scale_b: torch.Tensor, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
     global _warned_scaled_mm
+    m, k = a.shape
+    k2, n = b.shape
+
+    # Zero-Copy Fast Path: M, K, N are 16-aligned, 'a' is row-major contiguous, and 'b' is column-major
+    if (m % 16 == 0 and k % 16 == 0 and n % 16 == 0 and
+            a.is_contiguous() and b.t().is_contiguous()):
+        try:
+            res = torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype)
+            if isinstance(res, tuple):
+                return res[0]
+            return res
+        except Exception:
+            pass  # Fall through to standard / padded path on error
+
     # mat1 (a) must be row-major (contiguous)
     if not a.is_contiguous():
         a = a.contiguous()
     # mat2 (b) must be column-major for torch._scaled_mm
     if not b.t().is_contiguous():
         b = b.t().contiguous().t()
-
-    m, k = a.shape
-    k2, n = b.shape
 
     # NVIDIA FP8 Tensor Core alignment constraint: M, N, K must be multiples of 16
     pad_m = (16 - (m % 16)) % 16
@@ -177,6 +188,7 @@ class APALinearFunction(torch.autograd.Function):
         weight_t: Optional[torch.Tensor] = None,
         gpu_amax_x: Optional[torch.Tensor] = None,
         gpu_amax_grad: Optional[torch.Tensor] = None,
+        weight_bwd: Optional[torch.Tensor] = None,
     ):
         """Forward pass for APALinear with NVIDIA-style Delayed Scaling."""
         ctx.config = config
@@ -189,6 +201,7 @@ class APALinearFunction(torch.autograd.Function):
         ctx.forensic_argmax = forensic_argmax
         ctx.capture_argmax_index = config.forensic_capture_argmax_index
         ctx.is_telemetry_step = is_telemetry_step
+        ctx.x_shape = x.shape
 
         if is_telemetry_step:
             with torch.no_grad():
@@ -223,10 +236,8 @@ class APALinearFunction(torch.autograd.Function):
                 s_a = _get_scale_one(x.device)
                 s_b = _get_scale_one(weight.device)
 
-            # Save FP8 quantized tensors for zero-redundancy backward pass
-            ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
-
             if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
+                ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
                 if config.enable_dynamic_scaling:
                     result = F.linear(x_fp8.float() * s_a, w_fp8.float() * s_b, bias.float() if bias is not None else None)
                 else:
@@ -248,6 +259,14 @@ class APALinearFunction(torch.autograd.Function):
                 result = out_2d.view(*original_shape[:-1], weight.shape[0])
                 if bias is not None:
                     result += bias.to(out_dtype)
+
+                # Pre-format tensors for zero-redundancy, zero-copy backward pass:
+                # 1. w_bwd_saved: column-major weight for grad_input (dX = dY @ W)
+                w_bwd_saved = weight_bwd if weight_bwd is not None else w_fp8.t().contiguous().t()
+                # 2. x_saved_bwd: column-major 2D activation for grad_weight (dW = dY.t() @ x_2d)
+                # (x_2d.t().contiguous().t()).t() is contiguous, fulfilling mat2 column-major constraint
+                x_saved_bwd = x_2d.t().contiguous().t()
+                ctx.save_for_backward(x_saved_bwd, w_bwd_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
             ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
@@ -319,7 +338,7 @@ class APALinearFunction(torch.autograd.Function):
                 w_f32 = w_saved.float() * s_w if config.enable_dynamic_scaling else w_saved.float()
 
                 if ctx.needs_input_grad[0]:
-                    grad_input = g_out_f32 @ w_f32
+                    grad_input = (g_out_f32 @ w_f32).view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else (g_out_f32 @ w_f32).view_as(x_saved)
                 if ctx.needs_input_grad[1]:
                     g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
                     x_2d = x_f32.reshape(-1, x_f32.shape[-1])
@@ -329,10 +348,10 @@ class APALinearFunction(torch.autograd.Function):
                     grad_bias = g_out_2d.sum(dim=0)
             else:
                 g_out_2d = g_fp8.reshape(-1, g_fp8.shape[-1])
-                x_2d = x_saved.reshape(-1, x_saved.shape[-1])
 
                 out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
                 if ctx.needs_input_grad[0]:
+                    # Zero-copy fast-path: g_out_2d is row-major, w_saved is pre-transposed column-major
                     grad_input_2d = _call_scaled_mm(
                         g_out_2d,
                         w_saved,
@@ -340,11 +359,13 @@ class APALinearFunction(torch.autograd.Function):
                         scale_b=s_w,
                         out_dtype=out_dtype
                     )
-                    grad_input = grad_input_2d.view_as(x_saved)
+                    grad_input = grad_input_2d.view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else grad_input_2d.view_as(x_saved)
                 if ctx.needs_input_grad[1]:
+                    # g_out_2d.t() is made contiguous for mat1, while x_saved is already pre-transposed column-major for mat2
+                    g_out_2d_t = g_out_2d.t().contiguous()
                     grad_weight = _call_scaled_mm(
-                        g_out_2d.t(),
-                        x_2d,
+                        g_out_2d_t,
+                        x_saved,
                         scale_a=s_g,
                         scale_b=s_x,
                         out_dtype=torch.float32
@@ -387,8 +408,8 @@ class APALinearFunction(torch.autograd.Function):
                 config.forensic_capture_argmax_index, forensic_argmax,
             )
 
-        # 22 outputs matching forward parameter count
-        return (grad_input, grad_weight, grad_bias) + (None,) * 19
+        # 23 outputs matching forward parameter count
+        return (grad_input, grad_weight, grad_bias) + (None,) * 20
 
 
 class APALinear(nn.Module):
@@ -428,6 +449,7 @@ class APALinear(nn.Module):
         self._weight_scale_initialized = False
         self.is_telemetry_step: bool = True
         self.weight_work_t = None
+        self.weight_work_bwd = None
 
         # ---------------------------------------------------------------------------
         # Forensic per-role buffers (CPU dicts, only populated when forensic ON)
@@ -519,17 +541,21 @@ class APALinear(nn.Module):
 
                     # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
                     object.__setattr__(self, 'weight_work_t', w_scaled.t())
+                    # Pre-transpose to column-major layout for backward pass grad_input (dX = dY @ W)
+                    object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
                     w_fp8 = w_detached.to(self.working_dtype)
                     object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
                     object.__setattr__(self, 'weight_work_t', w_fp8.t())
+                    object.__setattr__(self, 'weight_work_bwd', w_fp8.t().contiguous().t())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
             else:
                 object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
                 object.__setattr__(self, 'weight_work_t', None)
+                object.__setattr__(self, 'weight_work_bwd', None)
                 if b_detached is not None:
                     object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
 
@@ -617,6 +643,7 @@ class APALinear(nn.Module):
             self.weight_work_t,
             self.gpu_amax_x,
             self.gpu_amax_grad,
+            self.weight_work_bwd,
         )
 
         return out
