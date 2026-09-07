@@ -159,6 +159,23 @@ def main():
             print("Compiling model via torch.compile(backend='inductor')...", end="", flush=True)
             model = torch.compile(model)
             print(" Done.\n")
+            if use_apa and freeze_level is None and device.type == 'cuda':
+                print("  [Pre-warming Inductor cache for all precision levels (FP8, FP16, TF32)]...", end="", flush=True)
+                sample_batch = next(iter(train_loader))
+                bx, by = sample_batch[0].to(device, non_blocking=True), sample_batch[1].to(device, non_blocking=True)
+                for p_lvl in [LEVEL_FP8, LEVEL_FP16, LEVEL_TF32]:
+                    for m in apa_manager.apa_modules.values():
+                        m.level = p_lvl
+                    apa_manager.pre_step()
+                    out_sample = model(bx)
+                    loss_sample = F.cross_entropy(out_sample, by)
+                    loss_sample.backward()
+                    apa_manager.post_backward_sync_and_eval()
+                for m in apa_manager.apa_modules.values():
+                    m.level = LEVEL_FP8
+                for p in trainable_params:
+                    p.grad = None
+                print(" Done. (Transitions will now happen with 0 ms freeze!)")
         else:
             print("[WARN: torch.compile not available in this PyTorch version]\n")
 

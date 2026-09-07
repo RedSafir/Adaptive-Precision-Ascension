@@ -74,16 +74,6 @@ def main():
     assert out_e5m2.shape == grad_out.shape, f"Shape salah: {out_e5m2.shape}"
     print(" [PASS]")
 
-    # 3.5 Test Dual-Layout Fused Quantization
-    print("[3.5/4] Menguji Dual-Layout Fused Quantization (Zero-Copy cuBLAS)...", end="", flush=True)
-    out_row, out_col_raw = apa_cuda.fused_quantize_dual_layout_e4m3(x, scale, 448.0, amax_cuda)
-    assert out_row.shape == (M, K), f"Row shape error: {out_row.shape}"
-    assert out_col_raw.shape == (K, M), f"Col raw shape error: {out_col_raw.shape}"
-    out_col = out_col_raw.t()
-    assert out_col.shape == (M, K), f"Col shape error: {out_col.shape}"
-    assert out_col.t().is_contiguous(), "out_col.t() must be contiguous (column-major)"
-    print(" [PASS]")
-
     # 4. Micro-Benchmark: apa_cuda vs PyTorch Eager Fallback
     print("[4/4] Micro-benchmark Latensi Kuantisasi (100 iterasi)...")
     

@@ -188,7 +188,30 @@ def benchmark_single_method(method, args, data_batches):
     # 1. Warmup Phase (prime GPU caches and Triton JIT compilation)
     print(f"  [Warmup {args.warmup} steps]...", end="", flush=True)
     batch_idx = 0
-    for _ in range(args.warmup):
+    if getattr(args, 'compile', False) and apa_manager is not None and freeze_level is None and args.warmup >= 3:
+        # Multi-level compilation cache warmup: pre-compile FP8, FP16, and TF32 graphs
+        # so any dynamic escalation during training hits the pre-compiled cache with 0 ms freeze!
+        for p_lvl in [LEVEL_FP8, LEVEL_FP16, LEVEL_TF32]:
+            for mod in apa_manager.apa_modules.values():
+                mod.level = p_lvl
+            x, y = data_batches[batch_idx]
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            batch_idx += 1
+            apa_manager.pre_step()
+            optimizer.zero_grad(set_to_none=True)
+            out = model(x)
+            loss = F.cross_entropy(out, y)
+            loss.backward()
+            apa_manager.post_backward_sync_and_eval()
+            optimizer.step()
+        # Reset all modules to original level (FP8)
+        for mod in apa_manager.apa_modules.values():
+            mod.level = LEVEL_FP8
+        remaining_warmup = max(0, args.warmup - 3)
+    else:
+        remaining_warmup = args.warmup
+
+    for _ in range(remaining_warmup):
         x, y = data_batches[batch_idx]
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         batch_idx += 1
