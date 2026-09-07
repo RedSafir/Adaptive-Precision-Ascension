@@ -225,7 +225,7 @@ class APALinearFunction(torch.autograd.Function):
         if level == LEVEL_FP8:
             if config.enable_dynamic_scaling:
                 fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype)
+                x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype, gpu_amax=(gpu_amax if is_telemetry_step else None))
                 w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
 
                 s_a = inv_scale_x
@@ -321,7 +321,7 @@ class APALinearFunction(torch.autograd.Function):
 
             if config.enable_dynamic_scaling:
                 target_bwd = bwd_dtype if bwd_dtype is not None else torch.float32
-                g_fp8 = fused_scale_clamp_quantize_fp8(grad_output, scale_grad, v_max_bwd, target_bwd)
+                g_fp8 = fused_scale_clamp_quantize_fp8(grad_output, scale_grad, v_max_bwd, target_bwd, gpu_amax=(gpu_amax if ctx.is_telemetry_step else None))
                 s_g = inv_scale_grad
                 s_x = s_a
                 s_w = s_b

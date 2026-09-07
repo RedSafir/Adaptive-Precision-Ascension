@@ -2,6 +2,12 @@ import torch
 from typing import Optional
 
 try:
+    import apa_cuda
+    APA_CUDA_AVAILABLE = True
+except ImportError:
+    APA_CUDA_AVAILABLE = False
+
+try:
     import triton
     import triton.language as tl
     TRITON_AVAILABLE = True
@@ -74,13 +80,15 @@ def fused_scale_clamp_quantize_fp8(
     x: torch.Tensor,
     scale: torch.Tensor,
     max_val: float,
-    target_dtype: torch.dtype
+    target_dtype: torch.dtype,
+    gpu_amax: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     """Fused scale, clamp, and quantize to FP8 in a single GPU memory pass.
 
-    Uses a native Triton kernel for microsecond execution when available on CUDA,
-    and falls back to standard PyTorch operations gracefully if Triton is
-    unavailable or when traced by torch.compile (TorchInductor).
+    Prioritas eksekusi:
+    1. apa_cuda (Native C++/CUDA extension) — eksekusi 1-pass tercepat dengan tracking amax simultan
+    2. Triton JIT kernel — jika Triton tersedia pada arsitektur GPU
+    3. Native PyTorch elementwise operations — fusible IR untuk TorchInductor
     """
     is_compiling = False
     if hasattr(torch, 'compiler') and hasattr(torch.compiler, 'is_compiling'):
@@ -88,13 +96,24 @@ def fused_scale_clamp_quantize_fp8(
     elif hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'is_compiling'):
         is_compiling = torch._dynamo.is_compiling()
 
+    # Fast-path 1: Native CUDA C++ Extension (apa_cuda)
+    if not is_compiling and APA_CUDA_AVAILABLE and x.is_cuda:
+        try:
+            if target_dtype == torch.float8_e4m3fn:
+                return apa_cuda.fused_quantize_fp8_e4m3(x, scale, float(max_val), gpu_amax)
+            elif target_dtype == torch.float8_e5m2:
+                return apa_cuda.fused_quantize_fp8_e5m2(x, scale, float(max_val), gpu_amax)
+        except Exception:
+            pass
+
+    # Fast-path 2: Native Triton Kernel
     if not is_compiling and TRITON_AVAILABLE and x.is_cuda and target_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         try:
             return _triton_scale_clamp_quantize(x, scale, max_val, target_dtype)
         except Exception:
             pass
 
-    # Native PyTorch fallback (also gives TorchInductor clean fusible IR)
+    # Fast-path 3: Native PyTorch fallback (memberikan TorchInductor clean fusible IR)
     if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
         x_f32 = x.to(torch.float32)
     else:
