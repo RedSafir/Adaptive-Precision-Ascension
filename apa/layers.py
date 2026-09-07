@@ -97,7 +97,7 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
             if not _warned_scaled_mm:
                 print(f"[APA WARN] torch._scaled_mm failed on padded tensor: {e}. Falling back to float32 matmul.")
                 _warned_scaled_mm = True
-            return a.to(torch.float32) @ b.to(torch.float32)
+            return (a.to(torch.float32) @ b.to(torch.float32)) * (scale_a * scale_b)
     else:
         try:
             res = torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype)
@@ -108,7 +108,7 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
             if not _warned_scaled_mm:
                 print(f"[APA WARN] torch._scaled_mm failed: {e}. Falling back to float32 matmul.")
                 _warned_scaled_mm = True
-            return a.to(torch.float32) @ b.to(torch.float32)
+            return (a.to(torch.float32) @ b.to(torch.float32)) * (scale_a * scale_b)
 
 
 def _update_forensic_role(
@@ -337,13 +337,15 @@ class APALinearFunction(torch.autograd.Function):
                     )
                     grad_input = grad_input_2d.view_as(x_saved)
                 if ctx.needs_input_grad[1]:
-                    grad_weight_2d = _call_scaled_mm(
+                    grad_weight = _call_scaled_mm(
                         g_out_2d.t(),
                         x_2d,
                         scale_a=s_g,
                         scale_b=s_x,
                         out_dtype=torch.float32
                     )
+                if bias is not None and ctx.needs_input_grad[2]:
+                    grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).to(torch.float32).sum(dim=0)
         else:
             g_out = grad_output.to(w_saved.dtype) if grad_output.dtype != w_saved.dtype else grad_output
             if ctx.needs_input_grad[0]:
