@@ -233,10 +233,12 @@ class APAManager:
                 if module.weight_work is not None and module.weight_work.grad is not None:
                     g = module.weight_work.grad
                     module.weight_master.grad = g.float() if g.dtype != torch.float32 else g
+                    module.weight_work.grad = None
 
                 if module.bias_work is not None and module.bias_work.grad is not None:
                     bg = module.bias_work.grad
                     module.bias_master.grad = bg.float() if bg.dtype != torch.float32 else bg
+                    module.bias_work.grad = None
 
     def _do_full_evaluation(self) -> bool:
         """Evaluate overflow/underflow metrics for all modules.

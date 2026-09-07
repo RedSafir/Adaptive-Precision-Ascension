@@ -218,6 +218,7 @@ class APALinearFunction(torch.autograd.Function):
         gpu_amax_x: Optional[torch.Tensor] = None,
         gpu_amax_grad: Optional[torch.Tensor] = None,
         weight_bwd: Optional[torch.Tensor] = None,
+        weight_fp8: Optional[torch.Tensor] = None,
     ):
         """Forward pass for APALinear with NVIDIA-style Delayed Scaling."""
         ctx.config = config
@@ -253,42 +254,43 @@ class APALinearFunction(torch.autograd.Function):
                     )
 
         if level == LEVEL_FP8:
+            w_fp8 = weight_fp8 if weight_fp8 is not None else weight
             if not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_forward') and x.is_cuda and not config.enable_forensic_logging:
                 # Fast-Path: Pure Native C++ Fused Forward (Quantize + cuBLASLt GEMM + Epilogue Bias)
                 out_dtype_str = getattr(config, 'fp8_output_dtype', 'float16')
-                w_for_mm = weight_t if weight_t is not None else weight.t().contiguous()
+                w_for_mm = weight_t if weight_t is not None else w_fp8.t()
                 amax_tensor = gpu_amax if is_telemetry_step else None
 
                 result, x_fp8 = apa_cuda.fused_linear_forward(
-                    x, weight, w_for_mm, scale_x, inv_scale_x, inv_scale_w, bias, amax_tensor, out_dtype_str
+                    x, w_fp8, w_for_mm, scale_x, inv_scale_x, inv_scale_w, bias, amax_tensor, out_dtype_str
                 )
 
-                w_bwd_saved = weight_bwd if weight_bwd is not None else weight.t().contiguous().t()
+                w_bwd_saved = weight_bwd if weight_bwd is not None else w_fp8.t().contiguous().t()
                 ctx.save_for_backward(x_fp8, w_bwd_saved, bias, inv_scale_x, inv_scale_w, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
             else:
                 if config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
                     x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype, gpu_amax=(gpu_amax if is_telemetry_step else None))
-                    w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
+                    w_calc = w_fp8  # pre-scaled and pre-quantized in refresh_working_copy
 
                     s_a = inv_scale_x
                     s_b = inv_scale_w
                 else:
                     x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
-                    w_fp8 = weight.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else weight
+                    w_calc = w_fp8.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else w_fp8
                     s_a = _get_scale_one(x.device)
-                    s_b = _get_scale_one(weight.device)
+                    s_b = _get_scale_one(w_calc.device)
 
                 if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
-                    ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+                    ctx.save_for_backward(x_fp8, w_calc, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
                     if config.enable_dynamic_scaling:
-                        result = F.linear(x_fp8.float() * s_a, w_fp8.float() * s_b, bias.float() if bias is not None else None)
+                        result = F.linear(x_fp8.float() * s_a, w_calc.float() * s_b, bias.float() if bias is not None else None)
                     else:
-                        result = F.linear(x_fp8.float(), w_fp8.float(), bias.float() if bias is not None else None)
+                        result = F.linear(x_fp8.float(), w_calc.float(), bias.float() if bias is not None else None)
                 else:
                     original_shape = x.shape
                     x_2d = x_fp8.view(-1, x_fp8.shape[-1])
-                    w_for_mm = weight_t if weight_t is not None else w_fp8.t().contiguous()
+                    w_for_mm = weight_t if weight_t is not None else w_calc.t().contiguous()
 
                     out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
                     bias_fwd = bias.to(out_dtype) if bias is not None else None
@@ -301,18 +303,18 @@ class APALinearFunction(torch.autograd.Function):
                         out_dtype=out_dtype
                     )
 
-                    result = out_2d.view(*original_shape[:-1], weight.shape[0])
+                    result = out_2d.view(*original_shape[:-1], w_calc.shape[0])
 
                     # Pre-format tensors for zero-redundancy, zero-copy backward pass:
-                    # 1. w_bwd_saved: column-major weight for grad_input (dX = dY @ W)
-                    w_bwd_saved = weight_bwd if weight_bwd is not None else w_fp8.t().contiguous().t()
-                    # 2. x_saved_bwd: activation saved for grad_weight (dX = dY.t() @ X -> X column-major)
+                    w_bwd_saved = weight_bwd if weight_bwd is not None else w_calc.t().contiguous().t()
                     x_saved_bwd = x_2d.t().contiguous().t()
                     ctx.save_for_backward(x_saved_bwd, w_bwd_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
-            ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
-            result = F.linear(x, weight, bias)
+            w_16 = weight_fp8 if (weight_fp8 is not None and weight_fp8.dtype == torch.float16) else weight.to(torch.float16)
+            b_16 = bias.to(torch.float16) if bias is not None else None
+            ctx.save_for_backward(x, w_16, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            result = F.linear(x, w_16, b_16)
         else:  # LEVEL_TF32
             dummy = _get_scale_one(x.device)
             ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
@@ -473,8 +475,8 @@ class APALinearFunction(torch.autograd.Function):
                 config.forensic_capture_argmax_index, forensic_argmax,
             )
 
-        # 23 outputs matching forward parameter count
-        return (grad_input, grad_weight, grad_bias) + (None,) * 20
+        # 24 outputs matching forward parameter count
+        return (grad_input, grad_weight, grad_bias) + (None,) * 21
 
 
 class APALinear(nn.Module):
@@ -600,13 +602,19 @@ class APALinear(nn.Module):
             if self.level == LEVEL_FP8:
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
-                    object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
-
-                    # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
-                    object.__setattr__(self, 'weight_work_t', w_scaled.t())
-                    # Pre-transpose to column-major layout for backward pass grad_input (dX = dY @ W)
-                    object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
+                    if APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_quantize_fp8_dual_e4m3') and w_detached.is_cuda and not self.config.fp8_simulation_mode:
+                        # Zero-copy Dual Quantization in C++/CUDA (simultaneous row-major and column-major format)
+                        w_row, w_t = apa_cuda.fused_quantize_fp8_dual_e4m3(w_detached, self.scale_w, FP8_E4M3_MAX, None)
+                        object.__setattr__(self, 'weight_work', w_row.requires_grad_(self.weight_master.requires_grad))
+                        # w_row.t() has shape [K, N] with stride(0) == 1 (column-major) for forward scaled_mm
+                        object.__setattr__(self, 'weight_work_t', w_row.t())
+                        # w_t is [K, N] row-major -> w_t.t() is [N, K] with stride(0) == 1 (column-major) for backward dX! ZERO COPY!
+                        object.__setattr__(self, 'weight_work_bwd', w_t.t())
+                    else:
+                        w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
+                        object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+                        object.__setattr__(self, 'weight_work_t', w_scaled.t())
+                        object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
                     if b_detached is not None:
                         object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
@@ -688,8 +696,8 @@ class APALinear(nn.Module):
 
         out = APALinearFunction.apply(
             x_cast,
-            self.weight_work,
-            self.bias_work,
+            self.weight_master,
+            self.bias_master,
             self.config,
             self.level,
             self.gpu_amax,
@@ -708,6 +716,7 @@ class APALinear(nn.Module):
             self.gpu_amax_x,
             self.gpu_amax_grad,
             self.weight_work_bwd,
+            self.weight_work,
         )
 
         return out

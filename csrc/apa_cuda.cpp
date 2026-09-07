@@ -22,8 +22,12 @@ std::tuple<at::Tensor, at::Tensor> fused_linear_forward_cuda(
     // 1. Flatten input to 2D [M, K]
     at::Tensor x_2d = (x.dim() == 2 && x.is_contiguous()) ? x : x.reshape({M, K}).contiguous();
 
-    // 2. Fused scale, clamp, quantize with simultaneous amax tracking directly in CUDA
-    at::Tensor x_fp8 = fused_scale_clamp_quantize_cuda_e4m3(x_2d, scale_x, 448.0f, amax_x);
+    // 2. Dual Fused scale, clamp, quantize with simultaneous amax tracking directly in CUDA
+    // Produces: x_fp8 [M, K] (row-major) and x_t [K, M] (row-major transposed)
+    auto dual_x = fused_scale_clamp_quantize_dual_cuda_e4m3(x_2d, scale_x, 448.0f, amax_x);
+    at::Tensor x_fp8 = std::get<0>(dual_x);
+    at::Tensor x_t = std::get<1>(dual_x); // [K, M] row-major -> x_t.t() is [M, K] with stride(0) == 1 (column-major)
+    at::Tensor x_col = x_t.t();           // Zero-copy column-major view for backward dW!
 
     // 3. Select output precision
     at::ScalarType target_dtype = (out_dtype_str == "float16") ? at::kHalf : at::kFloat;
@@ -95,7 +99,7 @@ std::tuple<at::Tensor, at::Tensor> fused_linear_forward_cuda(
         out = out_2d;
     }
 
-    return std::make_tuple(out, x_fp8);
+    return std::make_tuple(out, x_col);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_linear_backward_cuda(
@@ -124,8 +128,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_linear_backward_cuda(
     at::Tensor g_out_2d = (grad_output.dim() == 2 && grad_output.is_contiguous())
         ? grad_output : grad_output.reshape({M, N}).contiguous();
 
-    // 2. Fused scale, clamp, quantize with simultaneous amax tracking directly in CUDA (E5M2)
-    at::Tensor g_fp8 = fused_scale_clamp_quantize_cuda_e5m2(g_out_2d, scale_grad, 57344.0f, amax_grad);
+    // 2. Dual Fused scale, clamp, quantize with simultaneous amax tracking directly in CUDA (E5M2)
+    // Produces g_fp8 [M, N] (row-major) AND g_fp8_t [N, M] (row-major!) in ONE pass with ZERO extra allocations!
+    auto dual_g = fused_scale_clamp_quantize_dual_cuda_e5m2(g_out_2d, scale_grad, 57344.0f, amax_grad);
+    at::Tensor g_fp8 = std::get<0>(dual_g);
+    at::Tensor g_fp8_t = std::get<1>(dual_g); // [N, M] row-major for dW = g_t @ X
 
     at::ScalarType act_dtype = (target_act_dtype_str == "float16") ? at::kHalf : at::kFloat;
 
@@ -177,9 +184,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_linear_backward_cuda(
     if (needs_grad_weight) {
         const int64_t K = (x_fp8.dim() == 2) ? x_fp8.size(1) : x_fp8.size(-1);
 
-        // g_fp8 is [M, N]. For mat1, it must be row-major [N, M]:
-        at::Tensor g_fp8_t = g_fp8.t().contiguous();
-        // x_fp8 is [M, K]. For mat2, it must be column-major [M, K]:
+        // g_fp8_t is ALREADY [N, M] row-major!
+        // x_fp8 is ALREADY [M, K] column-major (stride(0) == 1) saved from forward!
+        // ZERO .contiguous() allocations!
         at::Tensor x_col = x_fp8;
         if (!x_col.t().is_contiguous()) {
             x_col = x_fp8.t().contiguous().t();
@@ -235,6 +242,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "fused_quantize_fp8_e5m2",
         &fused_scale_clamp_quantize_cuda_e5m2,
         "Fused scale, clamp, and quantize to FP8 E5M2 with running amax tracking",
+        py::arg("x"),
+        py::arg("scale"),
+        py::arg("max_val") = 57344.0f,
+        py::arg("amax_out") = py::none()
+    );
+
+    m.def(
+        "fused_quantize_fp8_dual_e4m3",
+        &fused_scale_clamp_quantize_dual_cuda_e4m3,
+        "Dual fused scale, clamp, and quantize to FP8 E4M3 with simultaneous transpose and amax",
+        py::arg("x"),
+        py::arg("scale"),
+        py::arg("max_val") = 448.0f,
+        py::arg("amax_out") = py::none()
+    );
+
+    m.def(
+        "fused_quantize_fp8_dual_e5m2",
+        &fused_scale_clamp_quantize_dual_cuda_e5m2,
+        "Dual fused scale, clamp, and quantize to FP8 E5M2 with simultaneous transpose and amax",
         py::arg("x"),
         py::arg("scale"),
         py::arg("max_val") = 57344.0f,

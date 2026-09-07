@@ -140,6 +140,131 @@ at::Tensor dispatch_fused_quantize(
     return out;
 }
 
+// Dual-Output CUDA Kernel: Fused Scale + Clamp + Quantize + Transpose Write + Amax Tracking
+template <typename scalar_t, typename fp8_t>
+__global__ void fused_scale_clamp_quantize_dual_kernel(
+    const scalar_t* __restrict__ x,
+    const float* __restrict__ scale_ptr,
+    fp8_t* __restrict__ out_row,
+    fp8_t* __restrict__ out_t,
+    float* __restrict__ amax_out,
+    int64_t rows,
+    int64_t cols,
+    float max_val
+) {
+    const float scale = *scale_ptr;
+    const int64_t numel = rows * cols;
+    const int64_t tid = static_cast<int64_t>(blockDim.x) * blockIdx.x + threadIdx.x;
+    const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+
+    float thread_amax = 0.0f;
+
+    for (int64_t i = tid; i < numel; i += stride) {
+        float val = static_cast<float>(x[i]);
+        float abs_val = fabsf(val);
+        if (abs_val > thread_amax) {
+            thread_amax = abs_val;
+        }
+
+        float scaled = val * scale;
+        float clamped = fminf(fmaxf(scaled, -max_val), max_val);
+        fp8_t q_val = float_to_fp8<fp8_t>(clamped);
+
+        out_row[i] = q_val;
+
+        // Transpose write: element at (r, c) goes to (c, r) in transposed tensor [cols, rows]
+        int64_t r = i / cols;
+        int64_t c = i % cols;
+        out_t[c * rows + r] = q_val;
+    }
+
+    if (amax_out != nullptr) {
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            thread_amax = fmaxf(thread_amax, __shfl_down_sync(0xffffffff, thread_amax, offset));
+        }
+
+        __shared__ float s_amax[32];
+        const int lane = threadIdx.x % 32;
+        const int wid = threadIdx.x / 32;
+
+        if (lane == 0) {
+            s_amax[wid] = thread_amax;
+        }
+        __syncthreads();
+
+        if (wid == 0) {
+            const int num_warps = (blockDim.x + 31) / 32;
+            float block_amax = (lane < num_warps) ? s_amax[lane] : 0.0f;
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                block_amax = fmaxf(block_amax, __shfl_down_sync(0xffffffff, block_amax, offset));
+            }
+
+            if (lane == 0 && block_amax > 0.0f) {
+                atomicMaxFloat(amax_out, block_amax);
+            }
+        }
+    }
+}
+
+template <typename fp8_t>
+std::tuple<at::Tensor, at::Tensor> dispatch_fused_quantize_dual(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out,
+    c10::ScalarType target_dtype
+) {
+    TORCH_CHECK(x.is_cuda(), "Input tensor x must be on CUDA");
+    TORCH_CHECK(scale.is_cuda(), "Scale tensor must be on CUDA");
+
+    at::Tensor x_contig = x.contiguous();
+    at::Tensor scale_contig = scale.contiguous().to(at::kFloat);
+    const int64_t numel = x_contig.numel();
+    const int64_t cols = x_contig.size(-1);
+    const int64_t rows = numel / cols;
+
+    at::Tensor out_row = at::empty(x_contig.sizes(), x_contig.options().dtype(target_dtype));
+    at::Tensor out_t = at::empty({cols, rows}, x_contig.options().dtype(target_dtype));
+
+    if (numel == 0) {
+        return std::make_tuple(out_row, out_t);
+    }
+
+    float* amax_ptr = nullptr;
+    if (amax_out.has_value() && amax_out.value().defined()) {
+        TORCH_CHECK(amax_out.value().is_cuda(), "amax_out must be on CUDA");
+        TORCH_CHECK(amax_out.value().scalar_type() == at::kFloat, "amax_out must have float32 dtype");
+        amax_ptr = amax_out.value().data_ptr<float>();
+    }
+
+    const int threads = 256;
+    const int blocks = static_cast<int>(std::min<int64_t>((numel + threads - 1) / threads, 65535));
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x_contig.scalar_type(),
+        "fused_scale_clamp_quantize_dual_kernel",
+        ([&] {
+            fused_scale_clamp_quantize_dual_kernel<scalar_t, fp8_t><<<blocks, threads, 0, stream>>>(
+                x_contig.data_ptr<scalar_t>(),
+                scale_contig.data_ptr<float>(),
+                reinterpret_cast<fp8_t*>(out_row.data_ptr()),
+                reinterpret_cast<fp8_t*>(out_t.data_ptr()),
+                amax_ptr,
+                rows,
+                cols,
+                max_val
+            );
+        })
+    );
+
+    return std::make_tuple(out_row, out_t);
+}
+
 } // anonymous namespace
 
 at::Tensor fused_scale_clamp_quantize_cuda_e4m3(
@@ -158,4 +283,22 @@ at::Tensor fused_scale_clamp_quantize_cuda_e5m2(
     c10::optional<at::Tensor> amax_out
 ) {
     return dispatch_fused_quantize<__nv_fp8_e5m2>(x, scale, max_val, amax_out, at::kFloat8_e5m2);
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_scale_clamp_quantize_dual_cuda_e4m3(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+) {
+    return dispatch_fused_quantize_dual<__nv_fp8_e4m3>(x, scale, max_val, amax_out, at::kFloat8_e4m3fn);
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_scale_clamp_quantize_dual_cuda_e5m2(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+) {
+    return dispatch_fused_quantize_dual<__nv_fp8_e5m2>(x, scale, max_val, amax_out, at::kFloat8_e5m2);
 }

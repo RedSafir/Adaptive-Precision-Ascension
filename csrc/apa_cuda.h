@@ -27,6 +27,28 @@ at::Tensor fused_scale_clamp_quantize_cuda_e5m2(
 );
 
 /**
+ * Dual-Output Fused Scale, Clamp, Quantize to FP8 E4M3 + Simultaneous Transposition & Amax Tracking.
+ * Returns: (out_row [M, K] row-major, out_t [K, M] row-major)
+ */
+std::tuple<at::Tensor, at::Tensor> fused_scale_clamp_quantize_dual_cuda_e4m3(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+);
+
+/**
+ * Dual-Output Fused Scale, Clamp, Quantize to FP8 E5M2 + Simultaneous Transposition & Amax Tracking.
+ * Returns: (out_row [M, N] row-major, out_t [N, M] row-major)
+ */
+std::tuple<at::Tensor, at::Tensor> fused_scale_clamp_quantize_dual_cuda_e5m2(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+);
+
+/**
  * Helper to safely extract the output tensor from at::_scaled_mm across PyTorch versions,
  * handling both `at::Tensor` and `std::tuple<at::Tensor, at::Tensor>` return signatures.
  */
