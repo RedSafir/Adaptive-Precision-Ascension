@@ -17,6 +17,7 @@ except ImportError:
         APA_CUDA_AVAILABLE = True
     except ImportError:
         APA_CUDA_AVAILABLE = False
+        apa_cuda = None
 
 try:
     import triton

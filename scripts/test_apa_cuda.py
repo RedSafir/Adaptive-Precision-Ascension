@@ -75,7 +75,7 @@ def main():
     print(" [PASS]")
 
     # 4. Micro-Benchmark: apa_cuda vs PyTorch Eager Fallback
-    print("[4/4] Micro-benchmark Latensi Kuantisasi (100 iterasi)...")
+    print("[4/5] Micro-benchmark Latensi Kuantisasi (100 iterasi)...")
     
     # Warmup
     for _ in range(20):
@@ -107,11 +107,68 @@ def main():
     speedup = pytorch_time_ms / cuda_time_ms if cuda_time_ms > 0 else 1.0
 
     print("-" * 65)
-    print(f"📊 HASIL MICRO-BENCHMARK (Tensor {M}x{K} = ~{M*K/1e6:.1f}M elements):")
+    print(f"📊 HASIL MICRO-BENCHMARK Kuantisasi ({M}x{K} = ~{M*K/1e6:.1f}M elements):")
     print(f"  • PyTorch Eager (4 separate kernels) : {pytorch_time_ms:.3f} ms")
     print(f"  • apa_cuda Native Fused Kernel       : {cuda_time_ms:.3f} ms")
     print(f"  • Speedup Kuantisasi                 : {speedup:.2f}x LEBIH CEPAT!")
     print("-" * 65)
+
+    # 5. Test Fused Linear Forward & Backward
+    print("[5/5] Menguji Pure C++ Fused Linear Forward & Backward...", end="", flush=True)
+    if hasattr(apa_cuda, 'fused_linear_forward') and hasattr(apa_cuda, 'fused_linear_backward'):
+        B, S, D = 64, 197, 768
+        x_3d = torch.randn(B, S, D, dtype=torch.float32, device=device)
+        w_master = torch.randn(D, D, dtype=torch.float32, device=device) * 0.02
+        w_fp8 = (w_master * 1.0).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        w_t = w_fp8.t().contiguous()
+        w_bwd = w_fp8.t().contiguous().t()
+        bias = torch.zeros(D, dtype=torch.float32, device=device)
+
+        scale_x = torch.tensor(1.0, dtype=torch.float32, device=device)
+        inv_scale_x = torch.tensor(1.0, dtype=torch.float32, device=device)
+        inv_scale_w = torch.tensor(1.0, dtype=torch.float32, device=device)
+        scale_grad = torch.tensor(1.0, dtype=torch.float32, device=device)
+        inv_scale_grad = torch.tensor(1.0, dtype=torch.float32, device=device)
+        amax_fwd = torch.zeros(1, dtype=torch.float32, device=device)
+        amax_bwd = torch.zeros(1, dtype=torch.float32, device=device)
+
+        # Forward
+        out_fwd, x_saved = apa_cuda.fused_linear_forward(
+            x_3d, w_fp8, w_t, scale_x, inv_scale_x, inv_scale_w, bias, amax_fwd, "float16"
+        )
+        assert out_fwd.shape == (B, S, D), f"Forward out shape salah: {out_fwd.shape}"
+        assert out_fwd.dtype == torch.float16, f"Forward out dtype salah: {out_fwd.dtype}"
+        assert x_saved.shape == (B * S, D), f"Saved x shape salah: {x_saved.shape}"
+
+        # Backward
+        grad_out_3d = torch.randn(B, S, D, dtype=torch.float16, device=device)
+        g_in, g_w, g_b = apa_cuda.fused_linear_backward(
+            grad_out_3d, x_saved, w_bwd, scale_grad, inv_scale_grad, inv_scale_x, inv_scale_w,
+            amax_bwd, True, True, True, "float16", list(x_3d.shape)
+        )
+        assert g_in.shape == x_3d.shape, f"Grad input shape salah: {g_in.shape}"
+        assert g_w.shape == w_fp8.shape, f"Grad weight shape salah: {g_w.shape}"
+        assert g_b.shape == bias.shape, f"Grad bias shape salah: {g_b.shape}"
+        print(" [PASS]")
+
+        # Micro-benchmark Fused Forward vs Python dispatch
+        for _ in range(20):
+            _ = apa_cuda.fused_linear_forward(x_3d, w_fp8, w_t, scale_x, inv_scale_x, inv_scale_w, bias, amax_fwd, "float16")
+        torch.cuda.synchronize(device)
+
+        start_event.record()
+        for _ in range(iters):
+            _ = apa_cuda.fused_linear_forward(x_3d, w_fp8, w_t, scale_x, inv_scale_x, inv_scale_w, bias, amax_fwd, "float16")
+        end_event.record()
+        torch.cuda.synchronize(device)
+        fwd_time_ms = start_event.elapsed_time(end_event) / iters
+
+        print("-" * 65)
+        print(f"⚡ Fused Linear Forward Latency ({B}x{S}x{D}): {fwd_time_ms:.3f} ms / layer")
+        print("-" * 65)
+    else:
+        print(" [SKIP - functions not found]")
+
     print("✅ Seluruh pengujian 'apa_cuda' BERHASIL SEMPURNA!\n")
 
 if __name__ == '__main__':

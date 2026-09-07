@@ -12,7 +12,7 @@ from .config import (
     FP8_E4M3_MAX, FP8_E5M2_MAX
 )
 from .telemetry import track_telemetry_on_tensor, compute_underflow_ratio
-from .kernels import fused_scale_clamp_quantize_fp8
+from .kernels import fused_scale_clamp_quantize_fp8, APA_CUDA_AVAILABLE, apa_cuda
 
 
 class APABoundaryCast(nn.Module):
@@ -253,7 +253,19 @@ class APALinearFunction(torch.autograd.Function):
                     )
 
         if level == LEVEL_FP8:
-            if config.enable_dynamic_scaling:
+            if not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_forward') and x.is_cuda and not config.enable_forensic_logging:
+                # Fast-Path: Pure Native C++ Fused Forward (Quantize + cuBLASLt GEMM + Epilogue Bias)
+                out_dtype_str = getattr(config, 'fp8_output_dtype', 'float16')
+                w_for_mm = weight_t if weight_t is not None else weight.t().contiguous()
+                amax_tensor = gpu_amax if is_telemetry_step else None
+
+                result, x_fp8 = apa_cuda.fused_linear_forward(
+                    x, weight, w_for_mm, scale_x, inv_scale_x, inv_scale_w, bias, amax_tensor, out_dtype_str
+                )
+
+                w_bwd_saved = weight_bwd if weight_bwd is not None else weight.t().contiguous().t()
+                ctx.save_for_backward(x_fp8, w_bwd_saved, bias, inv_scale_x, inv_scale_w, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            elif config.enable_dynamic_scaling:
                 fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
                 x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype, gpu_amax=(gpu_amax if is_telemetry_step else None))
                 w_fp8 = weight  # pre-scaled and pre-quantized in refresh_working_copy
@@ -347,8 +359,28 @@ class APALinearFunction(torch.autograd.Function):
         grad_input = grad_weight = grad_bias = None
 
         if level == LEVEL_FP8:
-            bwd_dtype = working_bwd_dtype
-            v_max_bwd = FP8_E5M2_MAX if (config.use_dual_fp8 and bwd_dtype == DTYPE_BACKWARD_MAP[0]) else FP8_E4M3_MAX
+            if not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_backward') and grad_output.is_cuda and not config.enable_forensic_logging:
+                # Fast-Path: Pure Native C++ Fused Backward (Quantize + dX GEMM + dW GEMM + Bias Sum)
+                target_act_dtype_str = getattr(config, 'fp8_output_dtype', 'float16')
+                amax_tensor = gpu_amax if ctx.is_telemetry_step else None
+                grad_input, grad_weight, grad_bias = apa_cuda.fused_linear_backward(
+                    grad_output,
+                    x_saved,
+                    w_saved,
+                    scale_grad,
+                    inv_scale_grad,
+                    s_a,
+                    s_b,
+                    amax_tensor,
+                    bool(ctx.needs_input_grad[0]),
+                    bool(ctx.needs_input_grad[1]),
+                    bool(bias is not None and ctx.needs_input_grad[2]),
+                    target_act_dtype_str,
+                    list(ctx.x_shape) if hasattr(ctx, 'x_shape') else []
+                )
+            else:
+                bwd_dtype = working_bwd_dtype
+                v_max_bwd = FP8_E5M2_MAX if (config.use_dual_fp8 and bwd_dtype == DTYPE_BACKWARD_MAP[0]) else FP8_E4M3_MAX
 
             if config.enable_dynamic_scaling:
                 target_bwd = bwd_dtype if bwd_dtype is not None else torch.float32
