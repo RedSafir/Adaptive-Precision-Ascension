@@ -526,20 +526,19 @@ class APALinear(nn.Module):
             return
         with torch.no_grad():
             eps = 1e-4
-            # 1. Update scale for activations x
-            amax_x_src = self.gpu_amax_x if self.gpu_amax_x > 0 else self.gpu_amax
+            # 1. Update scale for activations x (100% GPU asynchronous)
+            amax_x_src = torch.where(self.gpu_amax_x > 0, self.gpu_amax_x, self.gpu_amax)
             amax_val_x = torch.clamp(amax_x_src, min=eps)
             target_scale_x = torch.clamp(
                 (self.config.scale_margin * FP8_E4M3_MAX) / amax_val_x,
                 self.config.scale_min, self.config.scale_max
             )
-            # 100% GPU operation - zero CPU-GPU barriers!
             self.scale_x.copy_(torch.where(amax_x_src > 0, target_scale_x, self.scale_x))
             self.inv_scale_x.copy_(1.0 / self.scale_x)
 
-            # 2. Update scale for backward gradient
+            # 2. Update scale for backward gradient (100% GPU asynchronous)
             v_max_bwd = FP8_E5M2_MAX if self.config.use_dual_fp8 else FP8_E4M3_MAX
-            amax_grad_src = self.gpu_amax_grad if self.gpu_amax_grad > 0 else self.gpu_amax
+            amax_grad_src = torch.where(self.gpu_amax_grad > 0, self.gpu_amax_grad, self.gpu_amax)
             amax_val_grad = torch.clamp(amax_grad_src, min=eps)
             target_scale_grad = torch.clamp(
                 (self.config.scale_margin * v_max_bwd) / amax_val_grad,
