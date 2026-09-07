@@ -64,15 +64,15 @@ std::tuple<at::Tensor, at::Tensor> fused_linear_forward_cuda(
     bool bias_added = false;
     if (bias_fwd.has_value() && pad_n == 0) {
         try {
-            auto res = at::_scaled_mm(mm_x, mm_w, inv_scale_x, inv_scale_w, bias_fwd, c10::nullopt, target_dtype, /*use_fast_accum=*/false);
+            auto res = at::_scaled_mm(mm_x, mm_w, inv_scale_x, inv_scale_w, bias_fwd, c10::nullopt, target_dtype, /*use_fast_accum=*/true);
             out_2d = extract_scaled_mm_out(res);
             bias_added = true;
         } catch (...) {
-            auto res = at::_scaled_mm(mm_x, mm_w, inv_scale_x, inv_scale_w, c10::nullopt, c10::nullopt, target_dtype, /*use_fast_accum=*/false);
+            auto res = at::_scaled_mm(mm_x, mm_w, inv_scale_x, inv_scale_w, c10::nullopt, c10::nullopt, target_dtype, /*use_fast_accum=*/true);
             out_2d = extract_scaled_mm_out(res);
         }
     } else {
-        auto res = at::_scaled_mm(mm_x, mm_w, inv_scale_x, inv_scale_w, c10::nullopt, c10::nullopt, target_dtype, /*use_fast_accum=*/false);
+        auto res = at::_scaled_mm(mm_x, mm_w, inv_scale_x, inv_scale_w, c10::nullopt, c10::nullopt, target_dtype, /*use_fast_accum=*/true);
         out_2d = extract_scaled_mm_out(res);
     }
 
@@ -160,7 +160,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_linear_backward_cuda(
             mm_w = mm_w.t().contiguous().t(); // column-major
         }
 
-        auto res_in = at::_scaled_mm(mm_g, mm_w, inv_scale_grad, inv_scale_w, c10::nullopt, c10::nullopt, act_dtype, /*use_fast_accum=*/false);
+        auto res_in = at::_scaled_mm(mm_g, mm_w, inv_scale_grad, inv_scale_w, c10::nullopt, c10::nullopt, act_dtype, /*use_fast_accum=*/true);
         at::Tensor grad_input_2d = extract_scaled_mm_out(res_in);
         if (pad_m > 0 || pad_k > 0) {
             grad_input_2d = grad_input_2d.slice(0, 0, M).slice(1, 0, K);
@@ -199,7 +199,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_linear_backward_cuda(
             mm_x = mm_x.t().contiguous().t(); // column-major
         }
 
-        auto res_w = at::_scaled_mm(mm_gt, mm_x, inv_scale_grad, inv_scale_x, c10::nullopt, c10::nullopt, at::kFloat, /*use_fast_accum=*/false);
+        auto res_w = at::_scaled_mm(mm_gt, mm_x, inv_scale_grad, inv_scale_x, c10::nullopt, c10::nullopt, at::kFloat, /*use_fast_accum=*/true);
         at::Tensor grad_w_out = extract_scaled_mm_out(res_w);
         if (pad_n > 0 || pad_k > 0) {
             grad_w_out = grad_w_out.slice(0, 0, N).slice(1, 0, K);
