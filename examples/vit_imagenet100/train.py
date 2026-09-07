@@ -78,6 +78,8 @@ def parse_args():
                         help="Path to checkpoint (.pt) to resume training from")
     parser.add_argument('--no_save_checkpoint', action='store_true',
                         help="Disable automatic checkpoint saving")
+    parser.add_argument('--show_all_layers', action='store_true',
+                        help="Print precision status for every individual layer at each epoch summary")
     
     return parser.parse_args()
 
@@ -347,7 +349,61 @@ def main():
             f"Peak VRAM: {vram_mb:.1f} MB"
         )
 
-        # 6. Log epoch metrics to JSONL
+        # 6. Precision breakdown (shows how many and which layers are used at each precision)
+        precision_dist = None
+        layer_precisions = None
+        escalated_layers = []
+
+        if apa_manager is not None:
+            precision_names = {LEVEL_FP8: "FP8", LEVEL_FP16: "FP16", LEVEL_TF32: "TF32"}
+            layer_precisions = {
+                name: precision_names.get(mod.level, f"Level_{mod.level}")
+                for name, mod in apa_manager.apa_modules.items()
+            }
+            counts = {"FP8": 0, "FP16": 0, "TF32": 0}
+            for name, lvl in layer_precisions.items():
+                if lvl in counts:
+                    counts[lvl] += 1
+                if lvl != "FP8":
+                    escalated_layers.append((name, lvl))
+
+            total_apa = len(layer_precisions)
+            fp8_pct = (counts['FP8'] / total_apa * 100) if total_apa > 0 else 0
+            fp16_pct = (counts['FP16'] / total_apa * 100) if total_apa > 0 else 0
+            tf32_pct = (counts['TF32'] / total_apa * 100) if total_apa > 0 else 0
+
+            print(
+                f"   📊 APA Precision Breakdown: "
+                f"FP8={counts['FP8']} ({fp8_pct:.1f}%) | "
+                f"FP16={counts['FP16']} ({fp16_pct:.1f}%) | "
+                f"TF32={counts['TF32']} ({tf32_pct:.1f}%) [Total: {total_apa} layers]"
+            )
+
+            if escalated_layers:
+                print(f"   ⚡ Escalated Layers ({len(escalated_layers)}/{total_apa}):")
+                for name, lvl in escalated_layers:
+                    marker = "🔥 [TF32 Substitusi]" if lvl == "TF32" else "⚠️ [FP16]"
+                    print(f"      • {name:<36} -> {lvl} {marker}")
+            else:
+                print(f"   ✅ All {total_apa} layers operating at Level 0 (Pure FP8 Tensor Cores)")
+
+            if args.show_all_layers:
+                print("   📋 Full Layer Precision Map:")
+                for name, lvl in layer_precisions.items():
+                    print(f"      • {name:<36} : {lvl}")
+            print()
+
+            precision_dist = {
+                "fp8": counts["FP8"],
+                "fp16": counts["FP16"],
+                "tf32": counts["TF32"],
+                "fp8_percentage": round(fp8_pct, 2),
+                "fp16_percentage": round(fp16_pct, 2),
+                "tf32_percentage": round(tf32_pct, 2),
+                "total_layers": total_apa
+            }
+
+        # 7. Log epoch metrics and precision state to JSONL
         epoch_record = {
             "epoch": epoch + 1,
             "train_loss": round(train_loss_avg, 4),
@@ -361,6 +417,13 @@ def main():
             "precision": args.precision,
             "model_size": args.model_size
         }
+        if precision_dist is not None:
+            epoch_record["precision_distribution"] = precision_dist
+            epoch_record["layer_precisions"] = layer_precisions
+            epoch_record["escalated_layers"] = [
+                {"module": name, "level": lvl} for name, lvl in escalated_layers
+            ]
+
         with open(args.log_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(epoch_record) + '\n')
 
