@@ -672,7 +672,11 @@ class APALinear(nn.Module):
 
         # Boundary cast: cast input according to current precision level
         if self.level == LEVEL_FP8 and self.config.enable_dynamic_scaling:
-            x_cast = x.to(torch.float32) if x.dtype not in (torch.float32, torch.float16, torch.bfloat16) else x
+            fp8_dtype = DTYPE_MAP.get(LEVEL_FP8, None)
+            valid_dtypes = (torch.float32, torch.float16, torch.bfloat16)
+            if fp8_dtype is not None:
+                valid_dtypes = valid_dtypes + (fp8_dtype,)
+            x_cast = x.to(torch.float32) if x.dtype not in valid_dtypes else x
         else:
             w_dtype = self.working_dtype
             x_cast = x.to(w_dtype) if x.dtype != w_dtype else x
