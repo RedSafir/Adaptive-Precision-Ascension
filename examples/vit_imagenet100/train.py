@@ -40,8 +40,8 @@ def parse_args():
     parser.add_argument('--precision', type=lambda s: s.lower(), default='apa',
                         choices=['apa', 'fp8', 'fp16', 'tf32', 'fp32'],
                         help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8), 'fp16' (AMP), 'tf32' (Tensor Cores FP32), or 'fp32' (Strict IEEE 754)")
-    parser.add_argument('--model_size', type=str, default='small', choices=['tiny', 'small', 'base'],
-                        help="ViT model scale: 'tiny' (~5.7M), 'small' (~22M, default), or 'base' (~86M)")
+    parser.add_argument('--model_size', type=str, default='small', choices=['tiny', 'small', 'base', 'large'],
+                        help="ViT model scale: 'tiny' (~5.7M), 'small' (~22M, default), 'base' (~86M), or 'large' (~304M)")
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs (default: 50)")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size per step (default: 128)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Peak learning rate (default: 1e-3)")
