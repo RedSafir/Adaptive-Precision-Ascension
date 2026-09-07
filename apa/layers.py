@@ -12,7 +12,7 @@ from .config import (
     FP8_E4M3_MAX, FP8_E5M2_MAX
 )
 from .telemetry import track_telemetry_on_tensor, compute_underflow_ratio
-from .kernels import fused_scale_clamp_quantize_fp8, fused_scale_clamp_quantize_dual_fp8
+from .kernels import fused_scale_clamp_quantize_fp8
 
 
 class APABoundaryCast(nn.Module):
