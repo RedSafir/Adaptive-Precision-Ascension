@@ -192,7 +192,7 @@ def benchmark_single_method(method, args, data_batches):
         optimizer.zero_grad(set_to_none=True)
         
         if use_amp:
-            with torch.cuda.amp.autocast(dtype=torch.float16):
+            with torch.amp.autocast('cuda', dtype=torch.float16):
                 out = model(x)
                 loss = F.cross_entropy(out, y)
             scaler.scale(loss).backward()
@@ -234,7 +234,7 @@ def benchmark_single_method(method, args, data_batches):
         optimizer.zero_grad(set_to_none=True)
 
         if use_amp:
-            with torch.cuda.amp.autocast(dtype=torch.float16):
+            with torch.amp.autocast('cuda', dtype=torch.float16):
                 out = model(x)
                 loss = F.cross_entropy(out, y)
             scaler.scale(loss).backward()
