@@ -228,7 +228,7 @@ class APAManager:
     def _sync_grads_to_master(self):
         with torch.no_grad():
             for module in self.apa_modules.values():
-                if module.level == LEVEL_TF32:
+                if module.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
                     continue
                 if module.weight_work is not None and module.weight_work.grad is not None:
                     if module.weight_master.grad is None:
@@ -295,6 +295,10 @@ class APAManager:
 
                 for _, module in mod_items:
                     module.gpu_amax.zero_()
+                    if hasattr(module, 'gpu_amax_x'):
+                        module.gpu_amax_x.zero_()
+                    if hasattr(module, 'gpu_amax_grad'):
+                        module.gpu_amax_grad.zero_()
                     module.gpu_underflow_ratio.zero_()
                     module.gpu_has_nonfinite.zero_()
 

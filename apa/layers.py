@@ -175,6 +175,8 @@ class APALinearFunction(torch.autograd.Function):
         forensic_amax, forensic_shape, forensic_stats, forensic_argmax,
         is_telemetry_step: bool = True,
         weight_t: Optional[torch.Tensor] = None,
+        gpu_amax_x: Optional[torch.Tensor] = None,
+        gpu_amax_grad: Optional[torch.Tensor] = None,
     ):
         """Forward pass for APALinear with NVIDIA-style Delayed Scaling."""
         ctx.config = config
@@ -190,9 +192,10 @@ class APALinearFunction(torch.autograd.Function):
 
         if is_telemetry_step:
             with torch.no_grad():
-                # Track telemetry directly on input and weight
+                # Track telemetry on input activation (unscaled)
                 track_telemetry_on_tensor(x, gpu_amax, gpu_has_nonfinite)
-                track_telemetry_on_tensor(weight, gpu_amax, gpu_has_nonfinite)
+                if gpu_amax_x is not None:
+                    track_telemetry_on_tensor(x, gpu_amax_x, gpu_has_nonfinite)
 
                 if forensic_amax is not None:
                     _update_forensic_role(
@@ -221,7 +224,7 @@ class APALinearFunction(torch.autograd.Function):
                 s_b = _get_scale_one(weight.device)
 
             # Save FP8 quantized tensors for zero-redundancy backward pass
-            ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite)
+            ctx.save_for_backward(x_fp8, w_fp8, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
 
             if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
                 if config.enable_dynamic_scaling:
@@ -247,11 +250,11 @@ class APALinearFunction(torch.autograd.Function):
                     result += bias.to(out_dtype)
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
-            ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite)
+            ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
             result = F.linear(x, weight, bias)
         else:  # LEVEL_TF32
             dummy = _get_scale_one(x.device)
-            ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite)
+            ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
             result = F.linear(x, weight, bias)
 
         if is_telemetry_step:
@@ -269,7 +272,7 @@ class APALinearFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         saved = ctx.saved_tensors
-        x_saved, w_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite = saved
+        x_saved, w_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad = saved
         config = ctx.config
         level = ctx.level
         update_underflow_metric = ctx.update_underflow_metric
@@ -282,6 +285,8 @@ class APALinearFunction(torch.autograd.Function):
         if ctx.is_telemetry_step:
             with torch.no_grad():
                 track_telemetry_on_tensor(grad_output, gpu_amax, gpu_has_nonfinite)
+                if gpu_amax_grad is not None:
+                    track_telemetry_on_tensor(grad_output, gpu_amax_grad, gpu_has_nonfinite)
                 if forensic_amax is not None:
                     _update_forensic_role(
                         grad_output, 'grad_output',
@@ -382,8 +387,8 @@ class APALinearFunction(torch.autograd.Function):
                 config.forensic_capture_argmax_index, forensic_argmax,
             )
 
-        # 20 outputs matching forward parameter count
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        # 22 outputs matching forward parameter count
+        return (grad_input, grad_weight, grad_bias) + (None,) * 19
 
 
 class APALinear(nn.Module):
@@ -409,6 +414,8 @@ class APALinear(nn.Module):
         self.register_buffer('gpu_has_nonfinite', torch.zeros(1, dtype=torch.int32, device=config.device))
 
         # Delayed Scaling state (NVIDIA TransformerEngine style)
+        self.register_buffer('gpu_amax_x', torch.zeros(1, dtype=torch.float32, device=config.device), persistent=False)
+        self.register_buffer('gpu_amax_grad', torch.zeros(1, dtype=torch.float32, device=config.device), persistent=False)
         self.register_buffer('scale_x', torch.tensor([1.0], dtype=torch.float32, device=config.device))
         self.register_buffer('scale_w', torch.tensor([1.0], dtype=torch.float32, device=config.device))
         self.register_buffer('scale_grad', torch.tensor([1.0], dtype=torch.float32, device=config.device))
@@ -465,24 +472,29 @@ class APALinear(nn.Module):
             return
         with torch.no_grad():
             eps = 1e-4
-            amax_val = torch.clamp(self.gpu_amax, min=eps)
+            # 1. Update scale for activations x
+            amax_x_src = self.gpu_amax_x if self.gpu_amax_x > 0 else self.gpu_amax
+            amax_val_x = torch.clamp(amax_x_src, min=eps)
             target_scale_x = torch.clamp(
-                (self.config.scale_margin * FP8_E4M3_MAX) / amax_val,
+                (self.config.scale_margin * FP8_E4M3_MAX) / amax_val_x,
                 self.config.scale_min, self.config.scale_max
             )
             # 100% GPU operation - zero CPU-GPU barriers!
-            self.scale_x.copy_(torch.where(self.gpu_amax > 0, target_scale_x, self.scale_x))
+            self.scale_x.copy_(torch.where(amax_x_src > 0, target_scale_x, self.scale_x))
             self.inv_scale_x.copy_(1.0 / self.scale_x)
 
+            # 2. Update scale for backward gradient
             v_max_bwd = FP8_E5M2_MAX if self.config.use_dual_fp8 else FP8_E4M3_MAX
+            amax_grad_src = self.gpu_amax_grad if self.gpu_amax_grad > 0 else self.gpu_amax
+            amax_val_grad = torch.clamp(amax_grad_src, min=eps)
             target_scale_grad = torch.clamp(
-                (self.config.scale_margin * v_max_bwd) / amax_val,
+                (self.config.scale_margin * v_max_bwd) / amax_val_grad,
                 self.config.scale_min, self.config.scale_max
             )
-            self.scale_grad.copy_(torch.where(self.gpu_amax > 0, target_scale_grad, self.scale_grad))
+            self.scale_grad.copy_(torch.where(amax_grad_src > 0, target_scale_grad, self.scale_grad))
             self.inv_scale_grad.copy_(1.0 / self.scale_grad)
 
-            # Weight scales change very slowly: update periodically or initially
+            # 3. Weight scales change very slowly: update periodically or initially
             if update_weight or not self._weight_scale_initialized:
                 w_amax = _safe_amax(self.weight_master).clamp(min=eps)
                 self.scale_w.copy_(
@@ -603,6 +615,8 @@ class APALinear(nn.Module):
             f_amax, f_shape, f_stats, f_argmax,
             self.is_telemetry_step,
             self.weight_work_t,
+            self.gpu_amax_x,
+            self.gpu_amax_grad,
         )
 
         return out
