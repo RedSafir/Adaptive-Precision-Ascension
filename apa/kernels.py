@@ -80,15 +80,21 @@ def fused_scale_clamp_quantize_fp8(
 
     Uses a native Triton kernel for microsecond execution when available on CUDA,
     and falls back to standard PyTorch operations gracefully if Triton is
-    unavailable.
+    unavailable or when traced by torch.compile (TorchInductor).
     """
-    if TRITON_AVAILABLE and x.is_cuda and target_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+    is_compiling = False
+    if hasattr(torch, 'compiler') and hasattr(torch.compiler, 'is_compiling'):
+        is_compiling = torch.compiler.is_compiling()
+    elif hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'is_compiling'):
+        is_compiling = torch._dynamo.is_compiling()
+
+    if not is_compiling and TRITON_AVAILABLE and x.is_cuda and target_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         try:
             return _triton_scale_clamp_quantize(x, scale, max_val, target_dtype)
         except Exception:
             pass
 
-    # Native PyTorch fallback
+    # Native PyTorch fallback (also gives TorchInductor clean fusible IR)
     if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
         x_f32 = x.to(torch.float32)
     else:
