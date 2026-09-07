@@ -38,6 +38,7 @@ def get_args():
     parser.add_argument('--interval_telemetry', action='store_true', help="Sample telemetry only on check_interval steps instead of every step (default: False)")
     parser.add_argument('--telemetry_interval', type=int, default=0, help="Periodic step interval to log per-layer amax and underflow time series (defaults to 50 if --forensic is enabled, else 0)")
     parser.add_argument('--log_file', type=str, default='apa_vit_log.jsonl', help="Path to output JSONL log file")
+    parser.add_argument('--compile', action='store_true', help="Compile model with torch.compile(backend='inductor') for maximum throughput")
     return parser.parse_args()
 
 def main():
@@ -148,8 +149,19 @@ def main():
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     
+    if getattr(args, 'compile', False):
+        if hasattr(torch, 'compile'):
+            print("Compiling model via torch.compile(backend='inductor')...", end="", flush=True)
+            model = torch.compile(model)
+            print(" Done.\n")
+        else:
+            print("[WARN: torch.compile not available in this PyTorch version]\n")
+
     # Optimizer & Scheduler & Scaler
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if hasattr(torch.amp, 'GradScaler'):
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.05)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
@@ -181,7 +193,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             
             if use_amp:
-                with torch.cuda.amp.autocast(dtype=torch.float16):
+                with torch.amp.autocast('cuda', dtype=torch.float16):
                     out = model(x)
                     loss = F.cross_entropy(out, y)
                 scaler.scale(loss).backward()
@@ -206,15 +218,12 @@ def main():
             total_samples += x.size(0)
             
             if batch_idx % 50 == 0:
-                pbar.set_postfix({
-                    'loss': f"{loss.item():.4f}", 
-                    'acc': f"{(total_correct / total_samples)*100:.2f}%"
-                })
+                pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{total_correct/total_samples*100:.1f}%"})
                 
-        scheduler.step()
         epoch_duration = time.time() - epoch_start
+        scheduler.step()
         
-        # Evaluation Loop
+        # Validation
         model.eval()
         test_loss = 0.0
         test_correct = 0
@@ -223,7 +232,7 @@ def main():
             for x, y in test_loader:
                 x, y = x.to(device), y.to(device)
                 if use_amp:
-                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                    with torch.amp.autocast('cuda', dtype=torch.float16):
                         out = model(x)
                 else:
                     out = model(x)
