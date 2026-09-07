@@ -5,7 +5,18 @@ try:
     import apa_cuda
     APA_CUDA_AVAILABLE = True
 except ImportError:
-    APA_CUDA_AVAILABLE = False
+    try:
+        import sys, os, glob
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        for bl in glob.glob(os.path.join(repo_root, 'build', 'lib.*')):
+            if bl not in sys.path:
+                sys.path.insert(0, bl)
+        import apa_cuda
+        APA_CUDA_AVAILABLE = True
+    except ImportError:
+        APA_CUDA_AVAILABLE = False
 
 try:
     import triton
