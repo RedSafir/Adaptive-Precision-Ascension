@@ -130,3 +130,47 @@ def fused_scale_clamp_quantize_fp8(
     else:
         x_f32 = x
     return (x_f32 * scale).clamp(-max_val, max_val).to(target_dtype)
+
+
+def fused_scale_clamp_quantize_dual_fp8(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    max_val: float,
+    target_dtype: torch.dtype,
+    gpu_amax: Optional[torch.Tensor] = None
+):
+    """Dual-layout fused quantization in a single GPU pass.
+
+    Returns:
+        If target_dtype is E4M3 (forward):
+            (out_row, out_col) where out_col is already column-major for torch._scaled_mm mat2.
+        If target_dtype is E5M2 (backward grad_output):
+            (out_row, out_t) where out_t is [N, M] row-major contiguous for grad_weight GEMM mat1.
+    """
+    is_compiling = False
+    if hasattr(torch, 'compiler') and hasattr(torch.compiler, 'is_compiling'):
+        is_compiling = torch.compiler.is_compiling()
+    elif hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'is_compiling'):
+        is_compiling = torch._dynamo.is_compiling()
+
+    # Fast-path 1: Native CUDA C++ Dual-Layout (Zero runtime transposition)
+    if not is_compiling and APA_CUDA_AVAILABLE and x.is_cuda:
+        try:
+            if target_dtype == torch.float8_e4m3fn:
+                out_row, out_col_raw = apa_cuda.fused_quantize_dual_layout_e4m3(x, scale, float(max_val), gpu_amax)
+                return out_row, out_col_raw.t()
+            elif target_dtype == torch.float8_e5m2:
+                out_row, out_t = apa_cuda.fused_quantize_dual_layout_e5m2(x, scale, float(max_val), gpu_amax)
+                return out_row, out_t
+        except Exception:
+            pass
+
+    # Fallback: Single output + standard PyTorch layout adjustment
+    out_row = fused_scale_clamp_quantize_fp8(x, scale, max_val, target_dtype, gpu_amax)
+    if target_dtype == torch.float8_e4m3fn:
+        out_2d = out_row.view(-1, out_row.shape[-1])
+        out_col = out_2d.t().contiguous().t()
+        return out_row, out_col
+    else:
+        out_t = out_row.reshape(-1, out_row.shape[-1]).t().contiguous()
+        return out_row, out_t

@@ -231,16 +231,10 @@ class APAManager:
                 if module.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
                     continue
                 if module.weight_work is not None and module.weight_work.grad is not None:
-                    if module.weight_master.grad is None:
-                        module.weight_master.grad = module.weight_work.grad.to(torch.float32).clone()
-                    else:
-                        module.weight_master.grad.copy_(module.weight_work.grad.to(torch.float32))
+                    module.weight_master.grad = module.weight_work.grad
 
                 if module.bias_work is not None and module.bias_work.grad is not None:
-                    if module.bias_master.grad is None:
-                        module.bias_master.grad = module.bias_work.grad.to(torch.float32).clone()
-                    else:
-                        module.bias_master.grad.copy_(module.bias_work.grad.to(torch.float32))
+                    module.bias_master.grad = module.bias_work.grad
 
     def _do_full_evaluation(self) -> bool:
         """Evaluate overflow/underflow metrics for all modules.

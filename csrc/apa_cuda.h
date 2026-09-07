@@ -4,22 +4,10 @@
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 #include <c10/cuda/CUDAStream.h>
+#include <tuple>
 
 /**
- * Fused Scale, Clamp, Quantize to FP8 E4M3 with simultaneous Amax Tracking.
- * 
- * Performs in a single GPU memory pass:
- * 1. abs_max = max(|x|)
- * 2. scaled = x * scale
- * 3. clamped = clamp(scaled, -max_val, max_val)
- * 4. out = static_cast<__nv_fp8_e4m3>(clamped)
- * 5. *gpu_amax = max(*gpu_amax, abs_max) [atomic]
- * 
- * @param x Input tensor (float32, float16, or bfloat16) on CUDA
- * @param scale Scalar tensor (float32) on CUDA
- * @param max_val Maximum saturation bound (e.g. 448.0 for FP8 E4M3)
- * @param amax_out Optional 1-element float32 tensor on CUDA to accumulate running amax
- * @return Tensor with dtype torch.float8_e4m3fn, same shape as x
+ * Fused Scale, Clamp, Quantize to FP8 E4M3 with simultaneous Amax Tracking (Single Output).
  */
 at::Tensor fused_scale_clamp_quantize_cuda_e4m3(
     const at::Tensor& x,
@@ -29,16 +17,37 @@ at::Tensor fused_scale_clamp_quantize_cuda_e4m3(
 );
 
 /**
- * Fused Scale, Clamp, Quantize to FP8 E5M2 with simultaneous Amax Tracking.
- * Used primarily for backward gradients.
- * 
- * @param x Input tensor (float32, float16, or bfloat16) on CUDA
- * @param scale Scalar tensor (float32) on CUDA
- * @param max_val Maximum saturation bound (e.g. 57344.0 for FP8 E5M2)
- * @param amax_out Optional 1-element float32 tensor on CUDA to accumulate running amax
- * @return Tensor with dtype torch.float8_e5m2, same shape as x
+ * Fused Scale, Clamp, Quantize to FP8 E5M2 with simultaneous Amax Tracking (Single Output).
  */
 at::Tensor fused_scale_clamp_quantize_cuda_e5m2(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+);
+
+/**
+ * Dual-Layout Fused Quantization for FP8 E4M3:
+ * In a SINGLE GPU pass, produces BOTH:
+ * 1. out_row: Standard row-major [M, K]
+ * 2. out_col: Raw transposed matrix [K, M] whose .t() is column-major [M, K]
+ * Eliminates all runtime .t().contiguous() transposition overhead.
+ */
+std::tuple<at::Tensor, at::Tensor> fused_quantize_dual_layout_cuda_e4m3(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+);
+
+/**
+ * Dual-Layout Fused Quantization for FP8 E5M2 (Backward Pass):
+ * In a SINGLE GPU pass, produces BOTH:
+ * 1. out_row: Row-major grad_output [M, N] for grad_input GEMM
+ * 2. out_t: Row-major contiguous transposed grad_output [N, M] for grad_weight GEMM
+ * Eliminates all runtime .t().contiguous() transposition overhead in backward.
+ */
+std::tuple<at::Tensor, at::Tensor> fused_quantize_dual_layout_cuda_e5m2(
     const at::Tensor& x,
     const at::Tensor& scale,
     float max_val,

@@ -26,14 +26,17 @@ __device__ __forceinline__ __nv_fp8_e5m2 float_to_fp8<__nv_fp8_e5m2>(float f) {
     return __nv_fp8_e5m2(f);
 }
 
-// Unified CUDA Kernel: Fused Scale + Clamp + Quantize + Amax Tracking
+// Unified CUDA Kernel: Fused Scale + Clamp + Quantize + Optional Dual-Layout Output + Amax Tracking
 template <typename scalar_t, typename fp8_t>
 __global__ void fused_scale_clamp_quantize_kernel(
     const scalar_t* __restrict__ x,
     const float* __restrict__ scale_ptr,
-    fp8_t* __restrict__ out,
+    fp8_t* __restrict__ out_row,
+    fp8_t* __restrict__ out_col,  // optional, if non-null writes transposed matrix of shape [K, M]
     float* __restrict__ amax_out,
     int64_t numel,
+    int M,
+    int K,
     float max_val
 ) {
     const float scale = *scale_ptr;
@@ -49,12 +52,20 @@ __global__ void fused_scale_clamp_quantize_kernel(
             thread_amax = abs_val;
         }
 
-        // Fused scale and clamp
+        // Fused scale and clamp directly in registers
         float scaled = val * scale;
         float clamped = fminf(fmaxf(scaled, -max_val), max_val);
+        fp8_t fp8_val = float_to_fp8<fp8_t>(clamped);
 
-        // Quantize to target FP8 format
-        out[i] = float_to_fp8<fp8_t>(clamped);
+        // Store to primary row-major output
+        out_row[i] = fp8_val;
+
+        // Store to secondary column-major/transposed output if requested
+        if (out_col != nullptr) {
+            int row = static_cast<int>(i / K);
+            int col = static_cast<int>(i % K);
+            out_col[col * M + row] = fp8_val;
+        }
     }
 
     // Warp-level and Block-level Amax Reduction if amax_out is provided
@@ -92,7 +103,7 @@ __global__ void fused_scale_clamp_quantize_kernel(
 }
 
 template <typename fp8_t>
-at::Tensor dispatch_fused_quantize(
+at::Tensor dispatch_fused_quantize_single(
     const at::Tensor& x,
     const at::Tensor& scale,
     float max_val,
@@ -126,20 +137,82 @@ at::Tensor dispatch_fused_quantize(
         at::ScalarType::Half,
         at::ScalarType::BFloat16,
         x_contig.scalar_type(),
-        "fused_scale_clamp_quantize_kernel",
+        "fused_scale_clamp_quantize_single_kernel",
         ([&] {
             fused_scale_clamp_quantize_kernel<scalar_t, fp8_t><<<blocks, threads, 0, stream>>>(
                 x_contig.data_ptr<scalar_t>(),
                 scale_contig.data_ptr<float>(),
                 reinterpret_cast<fp8_t*>(out.data_ptr()),
+                nullptr,
                 amax_ptr,
                 numel,
+                1,
+                1,
                 max_val
             );
         })
     );
 
     return out;
+}
+
+template <typename fp8_t>
+std::tuple<at::Tensor, at::Tensor> dispatch_fused_quantize_dual(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out,
+    c10::ScalarType target_dtype
+) {
+    TORCH_CHECK(x.is_cuda(), "Input tensor x must be on CUDA");
+    TORCH_CHECK(scale.is_cuda(), "Scale tensor must be on CUDA");
+
+    at::Tensor x_contig = x.contiguous();
+    at::Tensor scale_contig = scale.contiguous().to(at::kFloat);
+    const int64_t numel = x_contig.numel();
+
+    const int K = static_cast<int>(x_contig.size(-1));
+    const int M = static_cast<int>(numel / K);
+
+    at::Tensor out_row = at::empty(x_contig.sizes(), x_contig.options().dtype(target_dtype));
+    at::Tensor out_col = at::empty({K, M}, x_contig.options().dtype(target_dtype));
+
+    if (numel == 0) {
+        return std::make_tuple(out_row, out_col);
+    }
+
+    float* amax_ptr = nullptr;
+    if (amax_out.has_value() && amax_out.value().defined()) {
+        TORCH_CHECK(amax_out.value().is_cuda(), "amax_out must be on CUDA");
+        TORCH_CHECK(amax_out.value().scalar_type() == at::kFloat, "amax_out must have float32 dtype");
+        amax_ptr = amax_out.value().data_ptr<float>();
+    }
+
+    const int threads = 256;
+    const int blocks = static_cast<int>(std::min<int64_t>((numel + threads - 1) / threads, 65535));
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x_contig.scalar_type(),
+        "fused_scale_clamp_quantize_dual_kernel",
+        ([&] {
+            fused_scale_clamp_quantize_kernel<scalar_t, fp8_t><<<blocks, threads, 0, stream>>>(
+                x_contig.data_ptr<scalar_t>(),
+                scale_contig.data_ptr<float>(),
+                reinterpret_cast<fp8_t*>(out_row.data_ptr()),
+                reinterpret_cast<fp8_t*>(out_col.data_ptr()),
+                amax_ptr,
+                numel,
+                M,
+                K,
+                max_val
+            );
+        })
+    );
+
+    return std::make_tuple(out_row, out_col);
 }
 
 } // anonymous namespace
@@ -150,7 +223,7 @@ at::Tensor fused_scale_clamp_quantize_cuda_e4m3(
     float max_val,
     c10::optional<at::Tensor> amax_out
 ) {
-    return dispatch_fused_quantize<__nv_fp8_e4m3>(x, scale, max_val, amax_out, at::kFloat8_e4m3fn);
+    return dispatch_fused_quantize_single<__nv_fp8_e4m3>(x, scale, max_val, amax_out, at::kFloat8_e4m3fn);
 }
 
 at::Tensor fused_scale_clamp_quantize_cuda_e5m2(
@@ -159,5 +232,23 @@ at::Tensor fused_scale_clamp_quantize_cuda_e5m2(
     float max_val,
     c10::optional<at::Tensor> amax_out
 ) {
-    return dispatch_fused_quantize<__nv_fp8_e5m2>(x, scale, max_val, amax_out, at::kFloat8_e5m2);
+    return dispatch_fused_quantize_single<__nv_fp8_e5m2>(x, scale, max_val, amax_out, at::kFloat8_e5m2);
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_quantize_dual_layout_cuda_e4m3(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+) {
+    return dispatch_fused_quantize_dual<__nv_fp8_e4m3>(x, scale, max_val, amax_out, at::kFloat8_e4m3fn);
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_quantize_dual_layout_cuda_e5m2(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    float max_val,
+    c10::optional<at::Tensor> amax_out
+) {
+    return dispatch_fused_quantize_dual<__nv_fp8_e5m2>(x, scale, max_val, amax_out, at::kFloat8_e5m2);
 }
