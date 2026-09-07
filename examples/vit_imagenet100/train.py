@@ -275,7 +275,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
 
             if use_amp:
-                with torch.cuda.amp.autocast(dtype=torch.float16):
+                with torch.amp.autocast('cuda', dtype=torch.float16):
                     outputs = model(images)
                     loss = F.cross_entropy(outputs, targets, label_smoothing=0.1)
                 scaler.scale(loss).backward()
@@ -326,7 +326,7 @@ def main():
             for images, targets in tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Val]", leave=False, dynamic_ncols=True):
                 images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
                 if use_amp:
-                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                    with torch.amp.autocast('cuda', dtype=torch.float16):
                         outputs = model(images)
                         loss = F.cross_entropy(outputs, targets)
                 else:
@@ -344,8 +344,10 @@ def main():
         val_top5_avg = val_top5_sum / val_batches if val_batches > 0 else 0.0
         epoch_time = time.perf_counter() - epoch_start
 
+        is_new_best = False
         if val_top1_avg > best_top1_acc:
             best_top1_acc = val_top1_avg
+            is_new_best = True
             star = " 🏆 (New Best!)"
         else:
             star = ""
@@ -453,7 +455,7 @@ def main():
                 'model_size': args.model_size
             }
             torch.save(ckpt_payload, last_ckpt_path)
-            if val_top1_avg >= best_top1_acc:
+            if is_new_best:
                 torch.save(ckpt_payload, best_ckpt_path)
 
     print("=" * 75)
