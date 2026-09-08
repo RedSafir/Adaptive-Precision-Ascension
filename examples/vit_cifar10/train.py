@@ -4,6 +4,10 @@ import argparse
 import time
 import torch
 import torch.nn.functional as F
+try:
+    import torch._dynamo
+except ImportError:
+    pass
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
@@ -157,9 +161,9 @@ def main():
     
     if getattr(args, 'compile', False):
         if hasattr(torch, 'compile'):
-            import torch._dynamo
-            torch._dynamo.config.force_parameter_static_shapes = False
-            torch._dynamo.config.suppress_errors = True
+            if hasattr(torch, '_dynamo'):
+                torch._dynamo.config.force_parameter_static_shapes = False
+                torch._dynamo.config.suppress_errors = True
             print("Compiling model via torch.compile(backend='inductor')...", end="", flush=True)
             model = torch.compile(model, dynamic=False)
             print(" Done.\n")

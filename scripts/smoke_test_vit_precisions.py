@@ -17,9 +17,12 @@ import sys
 import os
 import time
 import argparse
-import json
 import torch
 import torch.nn.functional as F
+try:
+    import torch._dynamo
+except ImportError:
+    pass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'examples', 'vit_cifar10'))
@@ -171,9 +174,9 @@ def benchmark_single_method(method, args, data_batches):
 
     if getattr(args, 'compile', False):
         if hasattr(torch, 'compile'):
-            import torch._dynamo
-            torch._dynamo.config.force_parameter_static_shapes = False
-            torch._dynamo.config.suppress_errors = True
+            if hasattr(torch, '_dynamo'):
+                torch._dynamo.config.force_parameter_static_shapes = False
+                torch._dynamo.config.suppress_errors = True
             print("  [Compiling model via torch.compile(backend='inductor')]...", end="", flush=True)
             model = torch.compile(model, dynamic=False)
             print(" Done.")
