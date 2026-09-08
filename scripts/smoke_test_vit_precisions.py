@@ -54,6 +54,14 @@ def parse_args():
                         help="Device to benchmark on")
     parser.add_argument('--compile', action='store_true',
                         help="Compile model with torch.compile(backend='inductor') for maximum kernel fusion")
+    parser.add_argument('--input_scale', type=float, default=1.0,
+                        help="Scale / standard deviation of synthetic dummy inputs (default: 1.0)")
+    parser.add_argument('--input_mean', type=float, default=0.0,
+                        help="Mean / offset of synthetic dummy inputs (default: 0.0)")
+    parser.add_argument('--input_outliers', type=float, default=0.0,
+                        help="Fraction of input elements injected with extreme spikes [0.0 - 1.0] (default: 0.0)")
+    parser.add_argument('--input_outlier_val', type=float, default=500.0,
+                        help="Magnitude of outlier spikes to test precision escalation (default: 500.0)")
     parser.add_argument('--cuda_graph', action='store_true',
                         help="Use Custom APA CUDA Graph Engine for compiled-level execution with 0 freeze")
     parser.add_argument('--save_json', type=str, default=None,
@@ -64,20 +72,30 @@ def get_data_loader(args):
     """Returns a data iterator yielding (x, y) batches."""
     if args.synthetic or not torch.cuda.is_available():
         class SyntheticDataset:
-            def __init__(self, count, batch_size, image_size, num_classes):
+            def __init__(self, count, batch_size, image_size, num_classes, scale=1.0, mean=0.0, outliers=0.0, outlier_val=500.0):
                 self.count = count
                 self.batch_size = batch_size
                 self.image_size = image_size
                 self.num_classes = num_classes
+                self.scale = scale
+                self.mean = mean
+                self.outliers = outliers
+                self.outlier_val = outlier_val
             def __iter__(self):
                 for _ in range(self.count):
-                    x = torch.randn(self.batch_size, 3, self.image_size, self.image_size)
+                    x = torch.randn(self.batch_size, 3, self.image_size, self.image_size) * self.scale + self.mean
+                    if self.outliers > 0.0:
+                        mask = torch.rand_like(x) < self.outliers
+                        x[mask] = self.outlier_val
                     y = torch.randint(0, self.num_classes, (self.batch_size,))
                     yield x, y
             def __len__(self):
                 return self.count
         total_batches = args.warmup + args.steps + 10
-        return SyntheticDataset(total_batches, args.batch_size, args.image_size, args.num_classes)
+        return SyntheticDataset(
+            total_batches, args.batch_size, args.image_size, args.num_classes,
+            scale=args.input_scale, mean=args.input_mean, outliers=args.input_outliers, outlier_val=args.input_outlier_val
+        )
     else:
         from torchvision import datasets, transforms
         from torch.utils.data import DataLoader
