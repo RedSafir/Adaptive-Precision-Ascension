@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", message=".*align should be passed as Python or
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.dirname(__file__))
-from apa import APAConfig, APAManager
+from apa import APAConfig, APAManager, APACUDAGraphRunner
 from apa.config import LEVEL_FP8, LEVEL_FP16, LEVEL_TF32
 from model import VisionTransformer
 
@@ -39,6 +39,7 @@ def get_args():
     parser.add_argument('--telemetry_interval', type=int, default=0, help="Periodic step interval to log per-layer amax and underflow time series (defaults to 50 if --forensic is enabled, else 0)")
     parser.add_argument('--log_file', type=str, default='apa_vit_log.jsonl', help="Path to output JSONL log file")
     parser.add_argument('--compile', action='store_true', help="Compile model with torch.compile(backend='inductor') for maximum throughput")
+    parser.add_argument('--cuda_graph', action='store_true', help="Use Custom APA CUDA Graph Engine for 0-freeze compiled execution")
     return parser.parse_args()
 
 def main():
@@ -156,8 +157,11 @@ def main():
     
     if getattr(args, 'compile', False):
         if hasattr(torch, 'compile'):
+            import torch._dynamo
+            torch._dynamo.config.force_parameter_static_shapes = False
+            torch._dynamo.config.suppress_errors = True
             print("Compiling model via torch.compile(backend='inductor')...", end="", flush=True)
-            model = torch.compile(model)
+            model = torch.compile(model, dynamic=False)
             print(" Done.\n")
             if use_apa and freeze_level is None and device.type == 'cuda':
                 print("  [Pre-warming Inductor cache for all precision levels (FP8, FP16, TF32)]...", end="", flush=True)
@@ -187,6 +191,25 @@ def main():
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.05)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
+    cuda_graph_runner = None
+    if getattr(args, 'cuda_graph', False) and device.type == 'cuda':
+        print("Capturing Custom APA CUDA Graph Engine (0-freeze mode)...", end="", flush=True)
+        sample_batch = next(iter(train_loader))
+        sx = sample_batch[0].to(device, non_blocking=True)
+        sy = sample_batch[1].to(device, non_blocking=True)
+        autocast_dt = torch.float16 if (use_amp or use_apa) else None
+        cuda_graph_runner = APACUDAGraphRunner(
+            model=model,
+            optimizer=optimizer,
+            sample_x=sx,
+            sample_y=sy,
+            apa_manager=apa_manager,
+            loss_fn=F.cross_entropy,
+            autocast_dtype=autocast_dt,
+            warmup_steps=3,
+        )
+        print(" Done. (0-freeze compiled execution ready!)\n")
+
     # Initialize Log File
     with open(args.log_file, 'w', encoding='utf-8') as f:
         header_data = {
@@ -207,8 +230,16 @@ def main():
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [{mode_str}]")
         for batch_idx, (x, y) in enumerate(pbar):
-            x, y = x.to(device), y.to(device)
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             
+            if cuda_graph_runner is not None:
+                loss_val = cuda_graph_runner.step(x, y)
+                total_loss += loss_val * x.size(0)
+                total_samples += x.size(0)
+                if batch_idx % 50 == 0:
+                    pbar.set_postfix({'loss': f"{loss_val:.4f}"})
+                continue
+
             if apa_manager is not None:
                 apa_manager.pre_step()
                 

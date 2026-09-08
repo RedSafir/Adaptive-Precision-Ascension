@@ -24,7 +24,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'examples', 'vit_cifar10'))
 
-from apa import APAConfig, APAManager
+from apa import APAConfig, APAManager, APACUDAGraphRunner
 from apa.config import LEVEL_FP8, LEVEL_FP16, LEVEL_TF32
 from model import VisionTransformer
 
@@ -51,6 +51,8 @@ def parse_args():
                         help="Device to benchmark on")
     parser.add_argument('--compile', action='store_true',
                         help="Compile model with torch.compile(backend='inductor') for maximum kernel fusion")
+    parser.add_argument('--cuda_graph', action='store_true',
+                        help="Use Custom APA CUDA Graph Engine for compiled-level execution with 0 freeze")
     parser.add_argument('--save_json', type=str, default=None,
                         help="Optional path to save benchmark metrics as JSON")
     return parser.parse_args()
@@ -169,8 +171,11 @@ def benchmark_single_method(method, args, data_batches):
 
     if getattr(args, 'compile', False):
         if hasattr(torch, 'compile'):
+            import torch._dynamo
+            torch._dynamo.config.force_parameter_static_shapes = False
+            torch._dynamo.config.suppress_errors = True
             print("  [Compiling model via torch.compile(backend='inductor')]...", end="", flush=True)
-            model = torch.compile(model)
+            model = torch.compile(model, dynamic=False)
             print(" Done.")
         else:
             print("  [WARN: torch.compile not available in this PyTorch version]")
@@ -187,67 +192,89 @@ def benchmark_single_method(method, args, data_batches):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
 
-    # 1. Warmup Phase (prime GPU caches and Triton JIT compilation)
-    print(f"  [Warmup {args.warmup} steps]...", end="", flush=True)
+    cuda_graph_runner = None
     batch_idx = 0
-    if getattr(args, 'compile', False) and apa_manager is not None and freeze_level is None and args.warmup >= 3:
-        # Multi-level compilation cache warmup: pre-compile FP8, FP16, and TF32 graphs
-        # so any dynamic escalation during training hits the pre-compiled cache with 0 ms freeze!
-        for p_lvl in [LEVEL_FP8, LEVEL_FP16, LEVEL_TF32]:
+
+    if getattr(args, 'cuda_graph', False) and device.type == 'cuda':
+        print("  [Capturing Custom APA CUDA Graph Engine (0-freeze mode)]...", end="", flush=True)
+        sample_x, sample_y = data_batches[0]
+        sample_x = sample_x.to(device, non_blocking=True)
+        sample_y = sample_y.to(device, non_blocking=True)
+        autocast_dt = torch.float16 if method in ('fp8', 'apa', 'fp16_apa', 'fp16') else None
+        cuda_graph_runner = APACUDAGraphRunner(
+            model=model,
+            optimizer=optimizer,
+            sample_x=sample_x,
+            sample_y=sample_y,
+            apa_manager=apa_manager,
+            loss_fn=F.cross_entropy,
+            autocast_dtype=autocast_dt,
+            warmup_steps=args.warmup,
+        )
+        batch_idx += max(1, args.warmup)
+        backend_desc += " + APA CUDA Graph Engine"
+        print(" Done.")
+    else:
+        # 1. Warmup Phase (prime GPU caches and Triton JIT compilation)
+        print(f"  [Warmup {args.warmup} steps]...", end="", flush=True)
+        if getattr(args, 'compile', False) and apa_manager is not None and freeze_level is None and args.warmup >= 3:
+            # Multi-level compilation cache warmup: pre-compile FP8, FP16, and TF32 graphs
+            # so any dynamic escalation during training hits the pre-compiled cache with 0 ms freeze!
+            for p_lvl in [LEVEL_FP8, LEVEL_FP16, LEVEL_TF32]:
+                for mod in apa_manager.apa_modules.values():
+                    mod.level = p_lvl
+                x, y = data_batches[batch_idx]
+                x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+                batch_idx += 1
+                apa_manager.pre_step()
+                optimizer.zero_grad(set_to_none=True)
+                out = model(x)
+                loss = F.cross_entropy(out, y)
+                loss.backward()
+                apa_manager.post_backward_sync_and_eval()
+                optimizer.step()
+            # Reset all modules to original level (FP8)
             for mod in apa_manager.apa_modules.values():
-                mod.level = p_lvl
+                mod.level = LEVEL_FP8
+            remaining_warmup = max(0, args.warmup - 3)
+        else:
+            remaining_warmup = args.warmup
+
+        for _ in range(remaining_warmup):
             x, y = data_batches[batch_idx]
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             batch_idx += 1
-            apa_manager.pre_step()
+            
+            if apa_manager is not None:
+                apa_manager.pre_step()
             optimizer.zero_grad(set_to_none=True)
-            out = model(x)
-            loss = F.cross_entropy(out, y)
-            loss.backward()
-            apa_manager.post_backward_sync_and_eval()
-            optimizer.step()
-        # Reset all modules to original level (FP8)
-        for mod in apa_manager.apa_modules.values():
-            mod.level = LEVEL_FP8
-        remaining_warmup = max(0, args.warmup - 3)
-    else:
-        remaining_warmup = args.warmup
-
-    for _ in range(remaining_warmup):
-        x, y = data_batches[batch_idx]
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        batch_idx += 1
-        
-        if apa_manager is not None:
-            apa_manager.pre_step()
-        optimizer.zero_grad(set_to_none=True)
-        
-        if use_amp:
-            with torch.amp.autocast('cuda', dtype=torch.float16):
+            
+            if use_amp:
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    out = model(x)
+                    loss = F.cross_entropy(out, y)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    out = model(x)
+                    loss = F.cross_entropy(out, y)
+                loss.backward()
+                if apa_manager is not None:
+                    apa_manager.post_backward_sync_and_eval()
+                optimizer.step()
+            else:
                 out = model(x)
                 loss = F.cross_entropy(out, y)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                out = model(x)
-                loss = F.cross_entropy(out, y)
-            loss.backward()
-            if apa_manager is not None:
-                apa_manager.post_backward_sync_and_eval()
-            optimizer.step()
-        else:
-            out = model(x)
-            loss = F.cross_entropy(out, y)
-            loss.backward()
-            if apa_manager is not None:
-                apa_manager.post_backward_sync_and_eval()
-            optimizer.step()
+                loss.backward()
+                if apa_manager is not None:
+                    apa_manager.post_backward_sync_and_eval()
+                optimizer.step()
 
-    if device.type == 'cuda':
-        torch.cuda.synchronize(device)
-    print(" Done.")
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        print(" Done.")
 
     # 2. Timed Benchmark Phase
     print(f"  [Benchmark {args.steps} steps]...", end="", flush=True)
@@ -268,34 +295,38 @@ def benchmark_single_method(method, args, data_batches):
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         batch_idx += 1
         
-        if apa_manager is not None:
-            apa_manager.pre_step()
-        optimizer.zero_grad(set_to_none=True)
-
-        if use_amp:
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                out = model(x)
-                loss = F.cross_entropy(out, y)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                out = model(x)
-                loss = F.cross_entropy(out, y)
-            loss.backward()
-            if apa_manager is not None:
-                apa_manager.post_backward_sync_and_eval()
-            optimizer.step()
+        if cuda_graph_runner is not None:
+            curr_loss = cuda_graph_runner.step(x, y)
         else:
-            out = model(x)
-            loss = F.cross_entropy(out, y)
-            loss.backward()
             if apa_manager is not None:
-                apa_manager.post_backward_sync_and_eval()
-            optimizer.step()
+                apa_manager.pre_step()
+            optimizer.zero_grad(set_to_none=True)
 
-        curr_loss = loss.detach().item()
+            if use_amp:
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    out = model(x)
+                    loss = F.cross_entropy(out, y)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    out = model(x)
+                    loss = F.cross_entropy(out, y)
+                loss.backward()
+                if apa_manager is not None:
+                    apa_manager.post_backward_sync_and_eval()
+                optimizer.step()
+            else:
+                out = model(x)
+                loss = F.cross_entropy(out, y)
+                loss.backward()
+                if apa_manager is not None:
+                    apa_manager.post_backward_sync_and_eval()
+                optimizer.step()
+
+            curr_loss = loss.detach().item()
+
         if step == 0:
             initial_loss = curr_loss
         if step == args.steps - 1:

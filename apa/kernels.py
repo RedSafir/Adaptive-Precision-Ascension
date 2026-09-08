@@ -19,6 +19,15 @@ except ImportError:
         APA_CUDA_AVAILABLE = False
         apa_cuda = None
 
+# Allow PyTorch compiler (TorchDynamo) to trace apa_cuda without graph breaks
+if APA_CUDA_AVAILABLE and hasattr(torch, 'compiler') and hasattr(torch.compiler, 'allow_in_graph'):
+    for _fn_name in ['fused_linear_forward', 'fused_linear_backward', 'fused_quantize_fp8_e4m3', 'fused_quantize_fp8_e5m2']:
+        if hasattr(apa_cuda, _fn_name):
+            try:
+                torch.compiler.allow_in_graph(getattr(apa_cuda, _fn_name))
+            except Exception:
+                pass
+
 try:
     import triton
     import triton.language as tl
