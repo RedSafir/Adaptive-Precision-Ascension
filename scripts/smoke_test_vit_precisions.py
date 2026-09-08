@@ -46,10 +46,13 @@ def parse_args():
                         choices=['fp8', 'fp16', 'fp16_apa', 'tf32', 'fp32', 'apa'],
                         type=lambda s: 'fp8' if s.lower() == 'fp8_fast' else s.lower(),
                         help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa, can include fp16_apa)")
+    parser.add_argument('--dataset', type=str, default='auto',
+                        choices=['auto', 'synthetic', 'cifar10', 'cifar100', 'imagenet', 'imagefolder'],
+                        help="Dataset type: 'synthetic', 'cifar10', 'cifar100', 'imagenet' (ImageFolder at data_dir)")
     parser.add_argument('--synthetic', action='store_true',
-                        help="Use synthetic random data (instant, no CIFAR-10 download needed)")
+                        help="Use synthetic random data (instant, no dataset download needed)")
     parser.add_argument('--data_dir', type=str, default=os.path.join('examples', 'vit_cifar10', 'data'),
-                        help="Path to CIFAR-10 dataset (used if not --synthetic)")
+                        help="Path to dataset directory (used if not --synthetic)")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help="Device to benchmark on")
     parser.add_argument('--compile', action='store_true',
@@ -70,7 +73,8 @@ def parse_args():
 
 def get_data_loader(args):
     """Returns a data iterator yielding (x, y) batches."""
-    if args.synthetic or not torch.cuda.is_available():
+    dataset_type = args.dataset.lower()
+    if args.synthetic or dataset_type == 'synthetic' or not torch.cuda.is_available():
         class SyntheticDataset:
             def __init__(self, count, batch_size, image_size, num_classes, scale=1.0, mean=0.0, outliers=0.0, outlier_val=500.0):
                 self.count = count
@@ -99,15 +103,40 @@ def get_data_loader(args):
     else:
         from torchvision import datasets, transforms
         from torch.utils.data import DataLoader
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
-        ])
-        os.makedirs(args.data_dir, exist_ok=True)
-        train_dataset = datasets.CIFAR10(root=args.data_dir, train=True, download=True, transform=transform_train)
-        return DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+
+        # Check for ImageNet / ImageFolder
+        is_image_folder = (dataset_type in ('imagenet', 'imagefolder') or
+                           (os.path.isdir(args.data_dir) and not os.path.exists(os.path.join(args.data_dir, 'cifar-10-batches-py')) and dataset_type == 'auto'))
+
+        if is_image_folder:
+            transform = transforms.Compose([
+                transforms.RandomResizedCrop(args.image_size),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+            train_dataset = datasets.ImageFolder(root=args.data_dir, transform=transform)
+            return DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+        elif dataset_type == 'cifar100':
+            transform = transforms.Compose([
+                transforms.Resize(args.image_size) if args.image_size != 32 else transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+            ])
+            os.makedirs(args.data_dir, exist_ok=True)
+            train_dataset = datasets.CIFAR100(root=args.data_dir, train=True, download=True, transform=transform)
+            return DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+        else:
+            transform_train = transforms.Compose([
+                transforms.Resize(args.image_size) if args.image_size != 32 else transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+            ])
+            os.makedirs(args.data_dir, exist_ok=True)
+            train_dataset = datasets.CIFAR10(root=args.data_dir, train=True, download=True, transform=transform_train)
+            return DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
 def benchmark_single_method(method, args, data_batches):
     """Runs warmup + timed steps for a single precision method."""

@@ -44,6 +44,14 @@ def get_args():
     parser.add_argument('--log_file', type=str, default='apa_vit_log.jsonl', help="Path to output JSONL log file")
     parser.add_argument('--compile', action='store_true', help="Compile model with torch.compile(backend='inductor') for maximum throughput")
     parser.add_argument('--cuda_graph', action='store_true', help="Use Custom APA CUDA Graph Engine for 0-freeze compiled execution")
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'cifar100', 'imagenet', 'imagefolder'], help="Dataset: cifar10, cifar100, imagenet")
+    parser.add_argument('--data_dir', type=str, default=None, help="Custom dataset path (e.g. for ImageNet ImageFolder)")
+    parser.add_argument('--dim', type=int, default=256, help="ViT hidden dimension (e.g. 256, 768, 1024, 1536)")
+    parser.add_argument('--depth', type=int, default=6, help="ViT depth (number of blocks)")
+    parser.add_argument('--heads', type=int, default=4, help="Number of attention heads")
+    parser.add_argument('--image_size', type=int, default=32, help="Image resolution (e.g. 32, 224)")
+    parser.add_argument('--patch_size', type=int, default=4, help="Patch size (e.g. 4 for 32x32, 16 for 224x224)")
+    parser.add_argument('--num_classes', type=int, default=10, help="Number of output classes (e.g. 10, 100, 1000)")
     return parser.parse_args()
 
 def main():
@@ -107,21 +115,54 @@ def main():
     print("=" * 60)
     
     # Dataset
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
-    ])
-    
-    data_dir = os.path.join(os.path.dirname(__file__), 'data')
-    train_dataset = datasets.CIFAR10(root=data_dir, train=True, download=True, transform=transform_train)
-    test_dataset = datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform_test)
+    data_dir = args.data_dir if args.data_dir is not None else os.path.join(os.path.dirname(__file__), 'data')
+    if args.dataset in ('imagenet', 'imagefolder'):
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(args.image_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize(int(args.image_size * 1.14)),
+            transforms.CenterCrop(args.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        val_dir = os.path.join(data_dir, 'val') if os.path.exists(os.path.join(data_dir, 'val')) else data_dir
+        train_dir = os.path.join(data_dir, 'train') if os.path.exists(os.path.join(data_dir, 'train')) else data_dir
+        train_dataset = datasets.ImageFolder(root=train_dir, transform=transform_train)
+        test_dataset = datasets.ImageFolder(root=val_dir, transform=transform_test)
+    elif args.dataset == 'cifar100':
+        transform_train = transforms.Compose([
+            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.ToTensor(),
+            transforms.ToTensor() if args.image_size == 32 else transforms.Lambda(lambda x: x),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        ])
+        os.makedirs(data_dir, exist_ok=True)
+        train_dataset = datasets.CIFAR100(root=data_dir, train=True, download=True, transform=transform_train)
+        test_dataset = datasets.CIFAR100(root=data_dir, train=False, download=True, transform=transform_test)
+    else: # CIFAR-10 default
+        transform_train = transforms.Compose([
+            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.ToTensor(),
+            transforms.ToTensor() if args.image_size == 32 else transforms.Lambda(lambda x: x),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+        ])
+        os.makedirs(data_dir, exist_ok=True)
+        train_dataset = datasets.CIFAR10(root=data_dir, train=True, download=True, transform=transform_train)
+        test_dataset = datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform_test)
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
@@ -150,12 +191,33 @@ def main():
             config.fp8_simulation_mode = True
             
         preserve_crit = not args.all_apa_layers
-        model = VisionTransformer(config=config, use_apa=True, preserve_critical_layers=preserve_crit).to(device)
+        model = VisionTransformer(
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            num_classes=args.num_classes,
+            dim=args.dim,
+            depth=args.depth,
+            heads=args.heads,
+            mlp_dim=args.dim * 4 if args.dim >= 768 else args.dim * 2,
+            config=config,
+            use_apa=True,
+            preserve_critical_layers=preserve_crit
+        ).to(device)
         apa_manager = APAManager(model, config)
         trainable_params = apa_manager.get_trainable_parameters()
     else:
         config = None
-        model = VisionTransformer(config=None, use_apa=False).to(device)
+        model = VisionTransformer(
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            num_classes=args.num_classes,
+            dim=args.dim,
+            depth=args.depth,
+            heads=args.heads,
+            mlp_dim=args.dim * 4 if args.dim >= 768 else args.dim * 2,
+            config=None,
+            use_apa=False
+        ).to(device)
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     
