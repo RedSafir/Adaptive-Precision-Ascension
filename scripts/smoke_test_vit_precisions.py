@@ -187,7 +187,10 @@ def benchmark_single_method(method, args, data_batches):
         scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.05)
+    opt_kwargs = {'lr': args.lr, 'weight_decay': 0.05}
+    if getattr(args, 'cuda_graph', False):
+        opt_kwargs['capturable'] = True
+    optimizer = torch.optim.AdamW(trainable_params, **opt_kwargs)
     model.train()
 
     # Reset VRAM counters
@@ -294,7 +297,7 @@ def benchmark_single_method(method, args, data_batches):
     wall_start = time.perf_counter()
 
     for step in range(args.steps):
-        x, y = data_batches[batch_idx]
+        x, y = data_batches[batch_idx % len(data_batches)]
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         batch_idx += 1
         

@@ -192,7 +192,10 @@ def main():
         scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.05)
+    opt_kwargs = {'lr': args.lr, 'weight_decay': 0.05}
+    if getattr(args, 'cuda_graph', False):
+        opt_kwargs['capturable'] = True
+    optimizer = torch.optim.AdamW(trainable_params, **opt_kwargs)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
     cuda_graph_runner = None

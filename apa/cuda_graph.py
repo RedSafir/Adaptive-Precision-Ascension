@@ -33,7 +33,7 @@ class APACUDAGraphRunner:
         self.apa_manager = apa_manager
         self.loss_fn = loss_fn
         self.autocast_dtype = autocast_dtype
-        self.warmup_steps = warmup_steps
+        self.warmup_steps = max(3, warmup_steps)
         self.device = sample_x.device
 
         # Pre-allocate static input/target buffers with fixed GPU memory addresses
@@ -50,6 +50,17 @@ class APACUDAGraphRunner:
         self.mempool = torch.cuda.graph_pool_handle()
         self.graph: Optional[torch.cuda.CUDAGraph] = None
 
+        # Ensure optimizer supports CUDA Graph capture (PyTorch AdamW requires capturable=True)
+        for group in self.optimizer.param_groups:
+            group['capturable'] = True
+            for p in group['params']:
+                state = self.optimizer.state.get(p, None)
+                if state is not None and 'step' in state:
+                    if not isinstance(state['step'], torch.Tensor):
+                        state['step'] = torch.tensor(float(state['step']), dtype=torch.float32, device=p.device)
+                    elif state['step'].device != p.device:
+                        state['step'] = state['step'].to(p.device)
+
         # Track module precision levels to trigger instant re-capture on escalation
         self.last_levels: List[int] = []
         if self.apa_manager is not None:
@@ -62,6 +73,17 @@ class APACUDAGraphRunner:
         """Warm up and capture the training forward, backward, sync, and optimizer step."""
         if not torch.cuda.is_available() or self.device.type != 'cuda':
             raise RuntimeError("CUDA Graphs require an active CUDA device.")
+
+        # Ensure optimizer supports CUDA Graph capture (PyTorch AdamW requires capturable=True)
+        for group in self.optimizer.param_groups:
+            group['capturable'] = True
+            for p in group['params']:
+                state = self.optimizer.state.get(p, None)
+                if state is not None and 'step' in state:
+                    if not isinstance(state['step'], torch.Tensor):
+                        state['step'] = torch.tensor(float(state['step']), dtype=torch.float32, device=p.device)
+                    elif state['step'].device != p.device:
+                        state['step'] = state['step'].to(p.device)
 
         # Ensure current stream is synchronized
         torch.cuda.current_stream().synchronize()
@@ -100,7 +122,6 @@ class APACUDAGraphRunner:
         with torch.cuda.graph(self.graph, stream=self.graph_stream, pool=self.mempool):
             if self.apa_manager is not None:
                 self.apa_manager.pre_step()
-            self.optimizer.zero_grad(set_to_none=True)
 
             if self.autocast_dtype is not None:
                 with torch.amp.autocast('cuda', dtype=self.autocast_dtype):
