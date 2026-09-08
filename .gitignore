@@ -31,6 +31,8 @@ ENV/
 *.pt
 *.pth
 *.bin
+*.jsonl
+result/*.jsonl
 examples/vit_cifar10/data/
 examples/nanogpt_char/input.txt
 

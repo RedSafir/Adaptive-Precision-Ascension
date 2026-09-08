@@ -270,7 +270,7 @@ def main():
         sample_batch = next(iter(train_loader))
         sx = sample_batch[0].to(device, non_blocking=True)
         sy = sample_batch[1].to(device, non_blocking=True)
-        autocast_dt = torch.float16 if (use_amp or use_apa) else None
+        autocast_dt = torch.float16 if use_amp else None
         loss_fn = lambda o, t: F.cross_entropy(o, t, label_smoothing=0.1)
         cuda_graph_runner = APACUDAGraphRunner(
             model=model,
@@ -364,8 +364,8 @@ def main():
                 'status': 'OK' if step_accepted else 'SKIP'
             })
 
-        scheduler.step()
-        train_loss_avg = total_train_loss / train_batches if train_batches > 0 else 0.0
+        divisor = total_train_samples if cuda_graph_runner is not None else train_batches
+        train_loss_avg = total_train_loss / divisor if divisor > 0 else 0.0
         train_acc_avg = train_top1_sum / train_batches if train_batches > 0 else 0.0
 
         # 5. Validation Loop

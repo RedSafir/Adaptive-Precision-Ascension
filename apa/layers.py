@@ -32,6 +32,13 @@ class APABoundaryCast(nn.Module):
             return x.to(working_dtype)
         return x
 
+def _is_compiling():
+    if hasattr(torch, 'compiler') and hasattr(torch.compiler, 'is_compiling'):
+        return torch.compiler.is_compiling()
+    if hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'is_compiling'):
+        return torch._dynamo.is_compiling()
+    return False
+
 def _safe_amax(tensor: torch.Tensor) -> torch.Tensor:
     with torch.no_grad():
         if tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -255,7 +262,7 @@ class APALinearFunction(torch.autograd.Function):
 
         if level == LEVEL_FP8:
             w_fp8 = weight_fp8 if weight_fp8 is not None else weight
-            if not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_forward') and x.is_cuda and not config.enable_forensic_logging:
+            if not _is_compiling() and not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_forward') and x.is_cuda and not config.enable_forensic_logging:
                 # Fast-Path: Pure Native C++ Fused Forward (Quantize + cuBLASLt GEMM + Epilogue Bias)
                 out_dtype_str = getattr(config, 'fp8_output_dtype', 'float16')
                 w_for_mm = weight_t if weight_t is not None else w_fp8.t()
@@ -362,7 +369,7 @@ class APALinearFunction(torch.autograd.Function):
         grad_input = grad_weight = grad_bias = None
 
         if level == LEVEL_FP8:
-            if not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_backward') and grad_output.is_cuda and not config.enable_forensic_logging:
+            if not _is_compiling() and not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_backward') and grad_output.is_cuda and not config.enable_forensic_logging:
                 # Fast-Path: Pure Native C++ Fused Backward (Quantize + dX GEMM + dW GEMM + Bias Sum)
                 target_act_dtype_str = getattr(config, 'fp8_output_dtype', 'float16')
                 amax_tensor = gpu_amax if ctx.is_telemetry_step else None

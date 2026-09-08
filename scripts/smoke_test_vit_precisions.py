@@ -43,9 +43,9 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=10, help="Number of output classes (default: 10, 100 for ImageNet-100)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate (default: 1e-3)")
     parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
-                        choices=['fp8', 'fp16', 'fp16_apa', 'tf32', 'fp32', 'apa'],
+                        choices=['fp8', 'fp16', 'fp16_apa', 'amp_fp16', 'tf32', 'fp32', 'apa'],
                         type=lambda s: 'fp8' if s.lower() == 'fp8_fast' else s.lower(),
-                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa, can include fp16_apa)")
+                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa, can include fp16_apa, amp_fp16)")
     parser.add_argument('--dataset', type=str, default='auto',
                         choices=['auto', 'synthetic', 'cifar10', 'cifar100', 'imagenet', 'imagefolder'],
                         help="Dataset type: 'synthetic', 'cifar10', 'cifar100', 'imagenet' (ImageFolder at data_dir)")
@@ -167,6 +167,11 @@ def benchmark_single_method(method, args, data_batches):
     elif method == 'fp16':
         use_apa = False
         freeze_level = None
+        use_amp = False
+        backend_desc = "Pure FP16 (model.half(), No AMP/Autocast)"
+    elif method == 'amp_fp16':
+        use_apa = False
+        freeze_level = None
         use_amp = True
         backend_desc = "PyTorch AMP FP16 Tensor Cores"
     elif method == 'fp16_apa':
@@ -174,7 +179,7 @@ def benchmark_single_method(method, args, data_batches):
         freeze_level = LEVEL_FP16
         use_amp = False
         fp8_output_dtype = 'float16'
-        backend_desc = "Controlled FP16 (APALinear Level 1)"
+        backend_desc = "Controlled FP16 (APALinear Level 1, No AMP)"
     elif method == 'fp8':
         use_apa = True
         freeze_level = LEVEL_FP8
@@ -216,6 +221,8 @@ def benchmark_single_method(method, args, data_batches):
             config=None, use_apa=False,
             dim=args.dim, depth=args.depth, mlp_dim=args.dim * 2
         ).to(device)
+        if method == 'fp16':
+            model = model.half()
         apa_manager = None
         trainable_params = [p for p in model.parameters() if p.requires_grad]
 
@@ -251,9 +258,9 @@ def benchmark_single_method(method, args, data_batches):
     if getattr(args, 'cuda_graph', False) and device.type == 'cuda':
         print("  [Capturing Custom APA CUDA Graph Engine (0-freeze mode)]...", end="", flush=True)
         sample_x, sample_y = data_batches[0]
-        sample_x = sample_x.to(device, non_blocking=True)
+        sample_x = sample_x.to(device, dtype=torch.float16 if (method == 'fp16' and not use_apa) else torch.float32, non_blocking=True)
         sample_y = sample_y.to(device, non_blocking=True)
-        autocast_dt = torch.float16 if method in ('fp8', 'apa', 'fp16_apa', 'fp16') else None
+        autocast_dt = torch.float16 if use_amp else None
         cuda_graph_runner = APACUDAGraphRunner(
             model=model,
             optimizer=optimizer,
@@ -295,7 +302,8 @@ def benchmark_single_method(method, args, data_batches):
 
         for _ in range(remaining_warmup):
             x, y = data_batches[batch_idx]
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x_in = x.to(device, dtype=torch.float16 if (method == 'fp16' and not use_apa) else torch.float32, non_blocking=True)
+            y_in = y.to(device, non_blocking=True)
             batch_idx += 1
             
             if apa_manager is not None:
@@ -304,22 +312,14 @@ def benchmark_single_method(method, args, data_batches):
             
             if use_amp:
                 with torch.amp.autocast('cuda', dtype=torch.float16):
-                    out = model(x)
-                    loss = F.cross_entropy(out, y)
+                    out = model(x_in)
+                    loss = F.cross_entropy(out, y_in)
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-            elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
-                with torch.amp.autocast('cuda', dtype=torch.float16):
-                    out = model(x)
-                    loss = F.cross_entropy(out, y)
-                loss.backward()
-                if apa_manager is not None:
-                    apa_manager.post_backward_sync_and_eval()
-                optimizer.step()
             else:
-                out = model(x)
-                loss = F.cross_entropy(out, y)
+                out = model(x_in)
+                loss = F.cross_entropy(out, y_in)
                 loss.backward()
                 if apa_manager is not None:
                     apa_manager.post_backward_sync_and_eval()
@@ -345,11 +345,12 @@ def benchmark_single_method(method, args, data_batches):
 
     for step in range(args.steps):
         x, y = data_batches[batch_idx % len(data_batches)]
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        x_in = x.to(device, dtype=torch.float16 if (method == 'fp16' and not use_apa) else torch.float32, non_blocking=True)
+        y_in = y.to(device, non_blocking=True)
         batch_idx += 1
         
         if cuda_graph_runner is not None:
-            curr_loss = cuda_graph_runner.step(x, y)
+            curr_loss = cuda_graph_runner.step(x_in, y_in)
         else:
             if apa_manager is not None:
                 apa_manager.pre_step()
@@ -357,22 +358,14 @@ def benchmark_single_method(method, args, data_batches):
 
             if use_amp:
                 with torch.amp.autocast('cuda', dtype=torch.float16):
-                    out = model(x)
-                    loss = F.cross_entropy(out, y)
+                    out = model(x_in)
+                    loss = F.cross_entropy(out, y_in)
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-            elif method in ('fp8', 'apa', 'fp16_apa') and device.type == 'cuda':
-                with torch.amp.autocast('cuda', dtype=torch.float16):
-                    out = model(x)
-                    loss = F.cross_entropy(out, y)
-                loss.backward()
-                if apa_manager is not None:
-                    apa_manager.post_backward_sync_and_eval()
-                optimizer.step()
             else:
-                out = model(x)
-                loss = F.cross_entropy(out, y)
+                out = model(x_in)
+                loss = F.cross_entropy(out, y_in)
                 loss.backward()
                 if apa_manager is not None:
                     apa_manager.post_backward_sync_and_eval()
