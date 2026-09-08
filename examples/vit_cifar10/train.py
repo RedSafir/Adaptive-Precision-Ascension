@@ -31,6 +31,9 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size")
     parser.add_argument('--lr', type=float, default=1e-3, help="Initial learning rate")
     parser.add_argument('--apa_preset', type=str, default='research', choices=['conservative', 'aggressive', 'research'], help="APA config preset")
+    parser.add_argument('--theta_underflow', type=float, default=None, help="Override underflow ratio threshold (e.g. 0.80 or 0.95)")
+    parser.add_argument('--disable_underflow', action='store_true', help="Disable silent underflow escalation entirely")
+    parser.add_argument('--check_interval', type=int, default=None, help="Override telemetry check interval in steps")
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
     parser.add_argument('--fp32_baseline', '--no_apa', action='store_true', dest='fp32_baseline', help="Run pure FP32 baseline training WITHOUT APA (uses standard nn.Linear)")
     parser.add_argument('--strict_fp32', action='store_true', help="Force strict IEEE 754 FP32 math (disables TF32 Tensor Cores, slower but exact 23-bit mantissa)")
@@ -186,6 +189,13 @@ def main():
             'interval_telemetry': args.interval_telemetry,
             'freeze_level': freeze_level,
         }
+        if args.theta_underflow is not None:
+            config_kwargs['theta_underflow'] = args.theta_underflow
+        if args.disable_underflow:
+            config_kwargs['theta_underflow'] = 1.01
+        if args.check_interval is not None:
+            config_kwargs['check_interval'] = args.check_interval
+
         config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:
             config.fp8_simulation_mode = True

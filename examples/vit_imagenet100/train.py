@@ -63,6 +63,12 @@ def parse_args():
     # APA Configuration
     parser.add_argument('--apa_preset', type=str, default='research', choices=['conservative', 'aggressive', 'research'],
                         help="APA config preset (default: research)")
+    parser.add_argument('--theta_underflow', type=float, default=None,
+                        help="Override underflow ratio threshold (e.g. 0.80 or 0.95; default: from preset)")
+    parser.add_argument('--disable_underflow', action='store_true',
+                        help="Disable silent underflow escalation entirely (only escalate on true OVERFLOW / NaN / Inf)")
+    parser.add_argument('--check_interval', type=int, default=None,
+                        help="Override telemetry check interval in steps (e.g. 8 or 16; default: from preset)")
     parser.add_argument('--fp8_sim', action='store_true', help="Use FP8 simulation mode")
     parser.add_argument('--strict_fp32', action='store_true',
                         help="Force strict IEEE 754 FP32 math (disables TF32 Tensor Cores)")
@@ -185,16 +191,24 @@ def main():
             'research': APAConfig.research_default,
         }
         telemetry_int = args.telemetry_interval if args.telemetry_interval > 0 else (50 if args.forensic else 0)
-        config = preset_map[args.apa_preset](
-            device=str(device),
-            log_file=args.log_file,
-            enable_forensic_logging=args.forensic,
-            forensic_capture_argmax_index=args.forensic_argmax,
-            telemetry_log_interval=telemetry_int,
-            interval_telemetry=args.interval_telemetry,
-            freeze_level=freeze_level,
-            fp8_output_dtype='float16'
-        )
+        config_kwargs = {
+            'device': str(device),
+            'log_file': args.log_file,
+            'enable_forensic_logging': args.forensic,
+            'forensic_capture_argmax_index': args.forensic_argmax,
+            'telemetry_log_interval': telemetry_int,
+            'interval_telemetry': args.interval_telemetry,
+            'freeze_level': freeze_level,
+            'fp8_output_dtype': 'float16',
+        }
+        if args.theta_underflow is not None:
+            config_kwargs['theta_underflow'] = args.theta_underflow
+        if args.disable_underflow:
+            config_kwargs['theta_underflow'] = 1.01  # Cannot trigger silent underflow escalation
+        if args.check_interval is not None:
+            config_kwargs['check_interval'] = args.check_interval
+
+        config = preset_map[args.apa_preset](**config_kwargs)
         if args.fp8_sim:
             config.fp8_simulation_mode = True
 
