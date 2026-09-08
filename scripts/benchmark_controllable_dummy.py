@@ -77,6 +77,8 @@ def parse_args():
                         help="Automatically sweep hidden dimensions (256 -> 4096) to find FP8 crossover point")
     parser.add_argument('--sweep_m', action='store_true',
                         help="Automatically sweep token count M (1024 -> 32768) to show batch scaling curve")
+    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32'],
+                        help="Precision methods to benchmark (e.g. --methods fp8 fp16)")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help="Device to benchmark on")
 
@@ -303,8 +305,8 @@ def run_single_layer_benchmark(args):
     print(f"Steps        : {args.steps} (+ {args.warmup} warmup)")
     print("=" * 85)
 
-    methods = ['fp8', 'fp16', 'tf32']
-    if args.outlier_ratio > 0.0:
+    methods = [m.lower() for m in args.methods]
+    if args.outlier_ratio > 0.0 and 'apa' not in methods:
         methods.append('apa')  # Also test dynamic escalation if outliers are injected
 
     results = {}
@@ -315,30 +317,33 @@ def run_single_layer_benchmark(args):
         print(f" Done. ({res['latency_ms']:.3f} ms, {res['tflops']:.1f} TFLOPS)")
 
     # Display comparison table
-    tf32_lat = results['tf32']['latency_ms']
-    fp16_lat = results['fp16']['latency_ms']
+    ref_lat = results.get('tf32', results.get('fp16', list(results.values())[0]))['latency_ms']
+    fp16_lat = results.get('fp16', {}).get('latency_ms', None)
 
     print("\n" + "=" * 88)
-    print(f"{'Method':<8} | {'Latency':<10} | {'Throughput (TFLOPS)':<20} | {'Speedup vs TF32':<16} | {'Speedup vs FP16':<16} | {'VRAM':<10}")
+    speedup_header = "Speedup vs TF32" if 'tf32' in results else "Speedup vs Baseline"
+    print(f"{'Method':<8} | {'Latency':<10} | {'Throughput (TFLOPS)':<20} | {speedup_header:<16} | {'Speedup vs FP16':<16} | {'VRAM':<10}")
     print("-" * 88)
     for m in methods:
         res = results[m]
-        sp_tf32 = tf32_lat / res['latency_ms'] if res['latency_ms'] > 0 else 1.0
-        sp_fp16 = fp16_lat / res['latency_ms'] if res['latency_ms'] > 0 else 1.0
+        sp_ref = ref_lat / res['latency_ms'] if res['latency_ms'] > 0 else 1.0
+        sp_fp16 = (fp16_lat / res['latency_ms']) if (fp16_lat is not None and res['latency_ms'] > 0) else 1.0
         extra_note = f" (Escalated: {res['final_level']})" if m == 'apa' and res['final_level'] != 'N/A' else ""
-        print(f"{m.upper() + extra_note:<8} | {res['latency_ms']:>7.3f} ms | {res['tflops']:>15.1f} TFLOPS | {sp_tf32:>14.2f}x | {sp_fp16:>14.2f}x | {res['peak_vram_mb']:>7.1f} MB")
+        sp_fp16_str = f"{sp_fp16:>14.2f}x" if fp16_lat is not None else "           N/A"
+        print(f"{m.upper() + extra_note:<8} | {res['latency_ms']:>7.3f} ms | {res['tflops']:>15.1f} TFLOPS | {sp_ref:>14.2f}x | {sp_fp16_str} | {res['peak_vram_mb']:>7.1f} MB")
     print("=" * 88)
 
     # Diagnostic Insight
-    fp8_lat = results['fp8']['latency_ms']
-    if fp8_lat < fp16_lat:
-        ratio = fp16_lat / fp8_lat
-        print(f"💡 [INSIGHT]: Di dimensi ini (M={args.M}, K={args.K}, N={args.N}), FP8 LEBIH CEPAT {ratio:.2f}x dibanding FP16!")
-        print("   Beban komputasi berada di zona COMPUTE-BOUND (Tensor Cores FP8 mendominasi).")
-    else:
-        diff_us = (fp8_lat - fp16_lat) * 1000.0
-        print(f"💡 [INSIGHT]: FP16 masih lebih cepat tipis (+{diff_us:.0f} µs) dibanding FP8.")
-        print("   Beban komputasi berada di zona MEMORY/LAUNCH-BOUND. Gunakan dimensi K/N lebih besar atau M lebih tinggi.")
+    if 'fp8' in results and 'fp16' in results:
+        fp8_lat = results['fp8']['latency_ms']
+        if fp8_lat < fp16_lat:
+            ratio = fp16_lat / fp8_lat
+            print(f"💡 [INSIGHT]: Di dimensi ini (M={args.M}, K={args.K}, N={args.N}), FP8 LEBIH CEPAT {ratio:.2f}x dibanding FP16!")
+            print("   Beban komputasi berada di zona COMPUTE-BOUND (Tensor Cores FP8 mendominasi).")
+        else:
+            diff_us = (fp8_lat - fp16_lat) * 1000.0
+            print(f"💡 [INSIGHT]: FP16 masih lebih cepat tipis (+{diff_us:.0f} µs) dibanding FP8.")
+            print("   Beban komputasi berada di zona MEMORY/LAUNCH-BOUND. Gunakan dimensi K/N lebih besar atau M lebih tinggi.")
 
 
 def run_dimension_sweep(args):
