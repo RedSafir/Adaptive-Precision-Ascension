@@ -8,6 +8,7 @@ graph in ~15-20 ms (1 step blip), completely eliminating the 20-60 second compil
 inherent to generic JIT compilers.
 """
 
+import time
 import torch
 import torch.nn as nn
 from typing import Optional, Callable, Any, Dict, List
@@ -45,9 +46,8 @@ class APACUDAGraphRunner:
         self.static_x.copy_(sample_x)
         self.static_y.copy_(sample_y)
 
-        # Isolated CUDA Stream and Graph Memory Pool
+        # Dedicated CUDA Stream
         self.graph_stream = torch.cuda.Stream(device=self.device)
-        self.mempool = torch.cuda.graph_pool_handle()
         self.graph: Optional[torch.cuda.CUDAGraph] = None
 
         # Ensure optimizer supports CUDA Graph capture (PyTorch AdamW requires capturable=True)
@@ -74,6 +74,16 @@ class APACUDAGraphRunner:
         if not torch.cuda.is_available() or self.device.type != 'cuda':
             raise RuntimeError("CUDA Graphs require an active CUDA device.")
 
+        # 1. Cleanly tear down any previous graph before re-capturing to avoid memory leaks & allocator assertions
+        is_recapture = (self.graph is not None)
+        if is_recapture:
+            if hasattr(self.graph, 'reset'):
+                self.graph.reset()
+            del self.graph
+            self.graph = None
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+
         # Ensure optimizer supports CUDA Graph capture (PyTorch AdamW requires capturable=True)
         for group in self.optimizer.param_groups:
             group['capturable'] = True
@@ -89,11 +99,12 @@ class APACUDAGraphRunner:
         torch.cuda.current_stream().synchronize()
         self.graph_stream.wait_stream(torch.cuda.current_stream())
 
-        # 1. Warmup phase on graph_stream:
+        # 2. Warmup phase on graph_stream:
         # Essential to populate PyTorch's private CUDA caching allocator pool
         # and allocate internal AdamW state buffers (momentum, variance)
+        warmup_iters = 1 if is_recapture else self.warmup_steps
         with torch.cuda.stream(self.graph_stream):
-            for _ in range(self.warmup_steps):
+            for _ in range(warmup_iters):
                 if self.apa_manager is not None:
                     self.apa_manager.pre_step()
                 self.optimizer.zero_grad(set_to_none=True)
@@ -115,11 +126,11 @@ class APACUDAGraphRunner:
 
         self.graph_stream.synchronize()
 
-        # 2. Capture phase into CUDAGraph
+        # 3. Capture phase into CUDAGraph (PyTorch creates an isolated private pool per capture)
         self.graph = torch.cuda.CUDAGraph()
         self.optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.graph(self.graph, stream=self.graph_stream, pool=self.mempool):
+        with torch.cuda.graph(self.graph, stream=self.graph_stream):
             if self.apa_manager is not None:
                 self.apa_manager.pre_step()
 
@@ -167,6 +178,18 @@ class APACUDAGraphRunner:
                 current_levels = [m.level for m in self.apa_manager.apa_modules.values()]
                 if current_levels != self.last_levels:
                     # Precision escalated! Instant re-capture in ~15-20 ms
+                    print(
+                        f"\n[APA CUDA Graph Engine] Dynamic precision escalation detected at step {self.apa_manager.step_count}. "
+                        f"Re-capturing CUDA Graph...",
+                        flush=True
+                    )
+                    t0 = time.perf_counter()
                     self.capture()
+                    t_cap = (time.perf_counter() - t0) * 1000.0
+                    print(
+                        f"[APA CUDA Graph Engine] Re-capture completed in {t_cap:.1f} ms. "
+                        f"Resuming zero-overhead execution.\n",
+                        flush=True
+                    )
 
         return self.static_loss.item()
