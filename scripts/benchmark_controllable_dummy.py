@@ -15,6 +15,7 @@ import sys
 import os
 import time
 import argparse
+import csv
 from typing import Dict, List, Tuple
 
 import torch
@@ -79,6 +80,10 @@ def parse_args():
                         help="Automatically sweep token count M (1024 -> 32768) to show batch scaling curve")
     parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32'],
                         help="Precision methods to benchmark (e.g. --methods fp8 fp16)")
+    parser.add_argument('--save_csv', type=str, default=None,
+                        help="Optional path to save sweep benchmark results as CSV")
+    parser.add_argument('--plot', type=str, default=None,
+                        help="Optional path to save comparison plot as PNG (e.g. result/plots/crossover.png)")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help="Device to benchmark on")
 
@@ -367,6 +372,7 @@ def run_dimension_sweep(args):
     print("-" * 95)
 
     crossover_found = None
+    sweep_records = []
 
     for dim in dim_list:
         res_fp8 = benchmark_layer_single_precision('fp8', M, dim, dim, args, device)
@@ -379,6 +385,18 @@ def run_dimension_sweep(args):
         if ratio > 1.0 and crossover_found is None:
             crossover_found = dim
 
+        sweep_records.append({
+            'dim': dim,
+            'fp8_latency_ms': res_fp8['latency_ms'],
+            'fp16_latency_ms': res_fp16['latency_ms'],
+            'tf32_latency_ms': res_tf32['latency_ms'],
+            'fp8_tflops': res_fp8['tflops'],
+            'fp16_tflops': res_fp16['tflops'],
+            'tf32_tflops': res_tf32['tflops'],
+            'speedup_fp8_vs_fp16': ratio,
+            'speedup_fp8_vs_tf32': res_tf32['latency_ms'] / res_fp8['latency_ms'],
+        })
+
         print(f"{dim:<10} | {res_fp8['latency_ms']:>8.3f} ms | {res_fp16['latency_ms']:>9.3f} ms | {res_tf32['latency_ms']:>9.3f} ms | {res_fp8['tflops']:>8.1f} TF | {res_fp16['tflops']:>9.1f} TF | {ratio:>5.2f}x ({symbol})")
 
     print("=" * 95)
@@ -386,6 +404,59 @@ def run_dimension_sweep(args):
         print(f"🎯 [KESIMPULAN CROSSOVER]: Titik di mana FP8 mulai mengalahkan FP16 adalah pada Dimensi K=N >= {crossover_found}!")
     else:
         print("ℹ️ [INFO]: FP16 masih unggul pada rentang dimensi ini. Coba naikkan M dengan flag `--M 16384` untuk meningkatkan saturasi Tensor Cores.")
+
+    # Save to CSV
+    if args.save_csv:
+        os.makedirs(os.path.dirname(os.path.abspath(args.save_csv)), exist_ok=True)
+        keys = sweep_records[0].keys()
+        with open(args.save_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(sweep_records)
+        print(f"💾 Data sweep berhasil disimpan ke: {args.save_csv}")
+
+    # Plot figure
+    if args.plot:
+        try:
+            import matplotlib.pyplot as plt
+            os.makedirs(os.path.dirname(os.path.abspath(args.plot)), exist_ok=True)
+            dims = [r['dim'] for r in sweep_records]
+            fp8_tf = [r['fp8_tflops'] for r in sweep_records]
+            fp16_tf = [r['fp16_tflops'] for r in sweep_records]
+            tf32_tf = [r['tf32_tflops'] for r in sweep_records]
+            speedups = [r['speedup_fp8_vs_fp16'] for r in sweep_records]
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+            
+            # Panel 1: Throughput (TFLOPS)
+            ax1.plot(dims, fp8_tf, label='FP8 (Native Tensor Cores)', color='#10B981', linewidth=2.5, marker='o')
+            ax1.plot(dims, fp16_tf, label='FP16 (AMP Tensor Cores)', color='#3B82F6', linewidth=2.2, marker='s')
+            ax1.plot(dims, tf32_tf, label='TF32 (Baseline)', color='#9CA3AF', linewidth=1.8, linestyle='--', marker='^')
+            if crossover_found:
+                ax1.axvline(x=crossover_found, color='#EF4444', linestyle=':', label=f'Crossover K={crossover_found}')
+            ax1.set_title(f'Compute Throughput (TFLOPS) vs Hidden Dim (M={M})', fontweight='bold', fontsize=12)
+            ax1.set_xlabel('Hidden Dimension (K=N)', fontweight='bold')
+            ax1.set_ylabel('Effective TFLOPS', fontweight='bold')
+            ax1.legend(frameon=True)
+            ax1.grid(True, alpha=0.3)
+
+            # Panel 2: Speedup Ratio (FP8 / FP16)
+            ax2.plot(dims, speedups, label='Speedup (FP8 / FP16)', color='#8B5CF6', linewidth=2.5, marker='D')
+            ax2.axhline(y=1.0, color='#EF4444', linestyle='--', label='1.0x Parity Line')
+            if crossover_found:
+                ax2.axvline(x=crossover_found, color='#EF4444', linestyle=':', label=f'Crossover ({crossover_found})')
+            ax2.set_title('FP8 Relative Speedup over FP16', fontweight='bold', fontsize=12)
+            ax2.set_xlabel('Hidden Dimension (K=N)', fontweight='bold')
+            ax2.set_ylabel('Speedup Factor', fontweight='bold')
+            ax2.legend(frameon=True)
+            ax2.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plt.savefig(args.plot, dpi=300)
+            plt.close()
+            print(f"📊 Grafik crossover berhasil disimpan ke: {args.plot}")
+        except Exception as e:
+            print(f"[WARN] Gagal membuat plot grafik: {e}")
 
 
 def main():
