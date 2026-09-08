@@ -44,6 +44,13 @@ MODEL_PRESETS = {
         'mlp_dim': 4096,
         'desc': "ViT-Large (ViT-L/16, ~304M params)",
     },
+    'giant': {
+        'dim': 1536,
+        'depth': 12,
+        'heads': 12,
+        'mlp_dim': 6144,
+        'desc': "ViT-Giant (ViT-g/16, Wide dim=1536, ~340M params)",
+    },
 }
 
 def _create_linear(in_features, out_features, bias=True, config=None, use_apa=True):

@@ -31,7 +31,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from apa import APAConfig, APAManager
+from apa import APAConfig, APAManager, APACUDAGraphRunner
 from apa.config import LEVEL_FP8, LEVEL_FP16, LEVEL_TF32
 from model import build_vit_imagenet100, MODEL_PRESETS
 from dataset import get_imagenet100_loaders
@@ -41,8 +41,10 @@ def parse_args():
     parser.add_argument('--precision', type=lambda s: s.lower(), default='apa',
                         choices=['apa', 'fp8', 'fp16', 'fp16_apa', 'tf32', 'fp32'],
                         help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8), 'fp16' (AMP), 'fp16_apa' (Controlled FP16 via APALinear), 'tf32' (Tensor Cores FP32), or 'fp32' (Strict IEEE 754)")
-    parser.add_argument('--model_size', type=str, default='small', choices=['tiny', 'small', 'base', 'large'],
-                        help="ViT model scale: 'tiny' (~5.7M), 'small' (~22M, default), 'base' (~86M), or 'large' (~304M)")
+    parser.add_argument('--model_size', type=str, default='small', choices=['tiny', 'small', 'base', 'large', 'giant'],
+                        help="ViT model scale: 'tiny' (~5.7M), 'small' (~22M, default), 'base' (~86M), 'large' (~304M), or 'giant' (dim=1536, ~340M)")
+    parser.add_argument('--cuda_graph', action='store_true',
+                        help="Use Custom APA CUDA Graph Engine for 0-freeze compiled execution")
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs (default: 50)")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size per step (default: 128)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Peak learning rate (default: 1e-3)")
@@ -229,7 +231,10 @@ def main():
             print("[WARN: torch.compile not available in this PyTorch version]\n")
 
     # 3. Optimizer & Scaler & LR Scheduler
-    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    opt_kwargs = {'lr': args.lr, 'weight_decay': args.weight_decay}
+    if getattr(args, 'cuda_graph', False):
+        opt_kwargs['capturable'] = True
+    optimizer = torch.optim.AdamW(trainable_params, **opt_kwargs)
     
     if hasattr(torch.amp, 'GradScaler'):
         scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
@@ -244,6 +249,26 @@ def main():
         return max(args.min_lr / args.lr, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    cuda_graph_runner = None
+    if getattr(args, 'cuda_graph', False) and device.type == 'cuda':
+        print("Capturing Custom APA CUDA Graph Engine (0-freeze mode)...", end="", flush=True)
+        sample_batch = next(iter(train_loader))
+        sx = sample_batch[0].to(device, non_blocking=True)
+        sy = sample_batch[1].to(device, non_blocking=True)
+        autocast_dt = torch.float16 if (use_amp or use_apa) else None
+        loss_fn = lambda o, t: F.cross_entropy(o, t, label_smoothing=0.1)
+        cuda_graph_runner = APACUDAGraphRunner(
+            model=model,
+            optimizer=optimizer,
+            sample_x=sx,
+            sample_y=sy,
+            apa_manager=apa_manager,
+            loss_fn=loss_fn,
+            autocast_dtype=autocast_dt,
+            warmup_steps=3,
+        )
+        print(" Done. (0-freeze compiled execution ready!)\n")
 
     log_dir = os.path.dirname(args.log_file)
     if log_dir:
@@ -275,6 +300,15 @@ def main():
         for batch_idx, (images, targets) in enumerate(pbar):
             images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
             
+            if cuda_graph_runner is not None:
+                loss_val = cuda_graph_runner.step(images, targets)
+                total_train_loss += loss_val * images.size(0)
+                total_train_samples += images.size(0)
+                train_batches += 1
+                if batch_idx % 50 == 0:
+                    pbar.set_postfix({'loss': f"{loss_val:.4f}"})
+                continue
+
             if apa_manager is not None:
                 apa_manager.pre_step()
             optimizer.zero_grad(set_to_none=True)
