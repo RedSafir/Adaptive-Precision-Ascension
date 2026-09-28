@@ -13,7 +13,7 @@ class TestUnderflow(unittest.TestCase):
         self.module = APALinear(16, 16, config=self.config)
         self.model = torch.nn.Sequential(self.module)
         self.manager = APAManager(self.model, config=self.config)
-        self.vmin = THRESHOLDS_MIN[LEVEL_FP8]
+        self.vmin = self.module.current_threshold_min
 
     def test_underflow_ratio_all_below_vmin(self):
         tensor = torch.full((10,), self.vmin / 2.0)

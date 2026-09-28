@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional
+from typing import Optional, Union, Tuple
 
 from .config import (
     APAConfig, LEVEL_FP8, LEVEL_FP16, LEVEL_TF32,
@@ -16,18 +16,19 @@ from .kernels import fused_scale_clamp_quantize_fp8, APA_CUDA_AVAILABLE, apa_cud
 
 
 class APABoundaryCast(nn.Module):
-    def __init__(self, parent_linear):
+    def __init__(self, parent_module):
         super().__init__()
-        # Use object.__setattr__ to prevent PyTorch from registering parent_linear
+        # Use object.__setattr__ to prevent PyTorch from registering parent_module
         # as a child submodule in self._modules, which causes an infinite recursion loop in model.to(device)
-        object.__setattr__(self, 'parent_linear', parent_linear)
+        object.__setattr__(self, 'parent_module', parent_module)
+        object.__setattr__(self, 'parent_linear', parent_module)
 
     def forward(self, x):
         # If dynamic scaling is active at FP8, keep x in full precision (float32)
-        # so that APALinearFunction can accurately compute amax and scale factors before quantizing.
-        if self.parent_linear.level == LEVEL_FP8 and self.parent_linear.config.enable_dynamic_scaling:
+        # so that Function can accurately compute amax and scale factors before quantizing.
+        if self.parent_module.level == LEVEL_FP8 and self.parent_module.config.enable_dynamic_scaling:
             return x.to(torch.float32) if x.dtype not in (torch.float32, torch.float16, torch.bfloat16) else x
-        working_dtype = self.parent_linear.working_dtype
+        working_dtype = self.parent_module.working_dtype
         if x.dtype != working_dtype:
             return x.to(working_dtype)
         return x
@@ -493,22 +494,15 @@ class APALinearFunction(torch.autograd.Function):
         return (grad_input, grad_weight, grad_bias) + (None,) * 21
 
 
-class APALinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True, config: APAConfig = APAConfig()):
+class APAModule(nn.Module):
+    """Base class for all APA (Adaptive Precision Architecture) layers.
+
+    Encapsulates precision tracking, NVIDIA-style delayed scaling buffers,
+    telemetry buffers, underflow metric updates, and forensic logging state.
+    """
+    def __init__(self, config: APAConfig = APAConfig()):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
         self.config = config
-
-        self.weight_master = nn.Parameter(torch.empty((out_features, in_features), dtype=torch.float32, device=config.device))
-        if bias:
-            self.bias_master = nn.Parameter(torch.empty(out_features, dtype=torch.float32, device=config.device))
-        else:
-            self.register_parameter('bias_master', None)
-
-        object.__setattr__(self, 'weight_work', None)
-        object.__setattr__(self, 'bias_work', None)
-
         self.level = LEVEL_FP8
 
         self.register_buffer('gpu_amax', torch.zeros(1, dtype=torch.float32, device=config.device))
@@ -529,25 +523,12 @@ class APALinear(nn.Module):
         self.boundary_cast = APABoundaryCast(self)
         self._weight_scale_initialized = False
         self.is_telemetry_step: bool = True
-        self.weight_work_t = None
-        self.weight_work_bwd = None
 
-        # ---------------------------------------------------------------------------
         # Forensic per-role buffers (CPU dicts, only populated when forensic ON)
-        # ---------------------------------------------------------------------------
         self._forensic_role_amax: dict = {}    # role -> float (max abs value)
         self._forensic_last_shape: dict = {}   # role -> list[int]
         self._forensic_role_stats: dict = {}   # role -> {mean, std} or empty
         self._forensic_role_argmax: dict = {}  # role -> int (flat index) or empty
-
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.weight_master, a=math.sqrt(5))
-        if self.bias_master is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_master)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias_master, -bound, bound)
 
     @property
     def working_dtype(self):
@@ -608,6 +589,70 @@ class APALinear(nn.Module):
                 self.inv_scale_w.copy_(1.0 / self.scale_w)
                 self._weight_scale_initialized = True
 
+    def track_telemetry(self, tensor: torch.Tensor, role: str = 'unspecified'):
+        """Update the running-max amax and nonfinite flag for this module."""
+        track_telemetry_on_tensor(tensor, self.gpu_amax, self.gpu_has_nonfinite)
+        if self.config.enable_forensic_logging:
+            _update_forensic_role(
+                tensor, role,
+                self._forensic_role_amax,
+                self._forensic_last_shape,
+                self._forensic_role_stats if self.config.forensic_capture_tensor_stats else None,
+                self.config.forensic_capture_argmax_index,
+                self._forensic_role_argmax,
+            )
+
+    def update_underflow_metric(self, grad: torch.Tensor):
+        with torch.no_grad():
+            ratio = compute_underflow_ratio(grad, self.current_threshold_min)
+            torch.maximum(self.gpu_underflow_ratio, ratio, out=self.gpu_underflow_ratio)
+
+
+class APALinear(APAModule):
+    """Adaptive Precision Linear layer supporting dynamic FP8 -> FP16 -> TF32 escalation."""
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, config: APAConfig = APAConfig()):
+        super().__init__(config=config)
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.weight_master = nn.Parameter(torch.empty((out_features, in_features), dtype=torch.float32, device=config.device))
+        if bias:
+            self.bias_master = nn.Parameter(torch.empty(out_features, dtype=torch.float32, device=config.device))
+        else:
+            self.register_parameter('bias_master', None)
+
+        object.__setattr__(self, 'weight_work', None)
+        object.__setattr__(self, 'bias_work', None)
+        self.weight_work_t = None
+        self.weight_work_bwd = None
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight_master, a=math.sqrt(5))
+        if self.bias_master is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_master)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias_master, -bound, bound)
+
+    @classmethod
+    def from_linear(cls, linear: nn.Linear, config: APAConfig = APAConfig(), initial_level: int = LEVEL_FP8) -> 'APALinear':
+        """Construct an APALinear module initialized with weights from an existing nn.Linear."""
+        apa_linear = cls(
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=(linear.bias is not None),
+            config=config,
+        )
+        apa_linear.level = initial_level
+        if linear.weight.device != apa_linear.weight_master.device:
+            apa_linear.to(linear.weight.device)
+        with torch.no_grad():
+            apa_linear.weight_master.copy_(linear.weight.data.float())
+            if linear.bias is not None:
+                apa_linear.bias_master.copy_(linear.bias.data.float())
+        return apa_linear
+
     def refresh_working_copy(self):
         with torch.no_grad():
             w_detached = self.weight_master.detach()
@@ -639,42 +684,7 @@ class APALinear(nn.Module):
                 if b_detached is not None:
                     object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
 
-    def track_telemetry(self, tensor: torch.Tensor, role: str = 'unspecified'):
-        """Update the running-max amax and nonfinite flag for this module.
-
-        Args:
-            tensor: The tensor to track (any dtype).
-            role: Semantic role of the tensor.  Used only when forensic logging
-                is enabled (``config.enable_forensic_logging=True``).  When
-                forensic mode is off the ``role`` argument is ignored entirely
-                and this method behaves identically to the original
-                implementation — no overhead is added.
-
-                Valid roles: ``"input_activation"``, ``"weight"``,
-                ``"output"``, ``"grad_output"``, ``"grad_weight"``,
-                ``"grad_input"``, ``"unspecified"``.
-        """
-        track_telemetry_on_tensor(tensor, self.gpu_amax, self.gpu_has_nonfinite)
-
-        # Per-role forensic tracking: only active when forensic mode is on.
-        # Performs a CPU-GPU sync (.item()) — intentionally trades speed for
-        # data completeness. See APAConfig.enable_forensic_logging warning.
-        if self.config.enable_forensic_logging:
-            _update_forensic_role(
-                tensor, role,
-                self._forensic_role_amax,
-                self._forensic_last_shape,
-                self._forensic_role_stats if self.config.forensic_capture_tensor_stats else None,
-                self.config.forensic_capture_argmax_index,
-                self._forensic_role_argmax,
-            )
-
-    def update_underflow_metric(self, grad: torch.Tensor):
-        with torch.no_grad():
-            ratio = compute_underflow_ratio(grad, self.current_threshold_min)
-            torch.maximum(self.gpu_underflow_ratio, ratio, out=self.gpu_underflow_ratio)
-
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Terminal Ceiling Fast-Path:
         # If this layer has reached LEVEL_TF32 (maximum ceiling), it can never escalate further.
         # Bypass telemetry reductions, custom autograd Function, working copies, and grad sync.
@@ -700,9 +710,6 @@ class APALinear(nn.Module):
             w_dtype = self.working_dtype
             x_cast = x.to(w_dtype) if x.dtype != w_dtype else x
 
-
-        # Pass forensic dicts only when forensic mode is on; None otherwise
-        # so APALinearFunction fast-paths around all forensic operations.
         if self.config.enable_forensic_logging:
             f_amax = self._forensic_role_amax
             f_shape = self._forensic_last_shape
@@ -711,7 +718,7 @@ class APALinear(nn.Module):
         else:
             f_amax = f_shape = f_stats = f_argmax = None
 
-        out = APALinearFunction.apply(
+        return APALinearFunction.apply(
             x_cast,
             self.weight_master,
             self.bias_master,
@@ -726,7 +733,6 @@ class APALinear(nn.Module):
             self.inv_scale_w,
             self.scale_grad,
             self.inv_scale_grad,
-            # Forensic args (None = forensic off, no overhead)
             f_amax, f_shape, f_stats, f_argmax,
             self.is_telemetry_step,
             self.weight_work_t,
@@ -736,4 +742,378 @@ class APALinear(nn.Module):
             self.weight_work,
         )
 
-        return out
+
+class APAConv2dFunction(torch.autograd.Function):
+    """Custom autograd Function for APA 2D Convolutions across FP8, FP16, and TF32."""
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        stride: Tuple[int, int],
+        padding: Union[Tuple[int, int], str],
+        dilation: Tuple[int, int],
+        groups: int,
+        config: APAConfig,
+        level: int,
+        gpu_amax: torch.Tensor,
+        gpu_has_nonfinite: torch.Tensor,
+        update_underflow_metric,
+        working_bwd_dtype,
+        scale_x: torch.Tensor,
+        inv_scale_x: torch.Tensor,
+        inv_scale_w: torch.Tensor,
+        scale_grad: torch.Tensor,
+        inv_scale_grad: torch.Tensor,
+        forensic_amax, forensic_shape, forensic_stats, forensic_argmax,
+        is_telemetry_step: bool = True,
+        gpu_amax_x: Optional[torch.Tensor] = None,
+        gpu_amax_grad: Optional[torch.Tensor] = None,
+        weight_work: Optional[torch.Tensor] = None,
+    ):
+        ctx.stride = stride
+        ctx.padding = padding
+        ctx.dilation = dilation
+        ctx.groups = groups
+        ctx.config = config
+        ctx.level = level
+        ctx.update_underflow_metric = update_underflow_metric
+        ctx.working_bwd_dtype = working_bwd_dtype
+        ctx.forensic_amax = forensic_amax
+        ctx.forensic_shape = forensic_shape
+        ctx.forensic_stats = forensic_stats
+        ctx.forensic_argmax = forensic_argmax
+        ctx.is_telemetry_step = is_telemetry_step
+        ctx.x_shape = x.shape
+        ctx.w_shape = weight.shape
+
+        if is_telemetry_step:
+            with torch.no_grad():
+                if level != LEVEL_FP8 or not config.enable_dynamic_scaling:
+                    track_telemetry_on_tensor(x, gpu_amax, gpu_has_nonfinite)
+                    if gpu_amax_x is not None:
+                        track_telemetry_on_tensor(x, gpu_amax_x, gpu_has_nonfinite)
+
+                if forensic_amax is not None:
+                    _update_forensic_role(
+                        x, 'input_activation',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
+                    _update_forensic_role(
+                        weight, 'weight',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
+
+        if level == LEVEL_FP8:
+            w_fp8 = weight_work if weight_work is not None else weight
+            if config.enable_dynamic_scaling:
+                fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
+                x_fp8 = fused_scale_clamp_quantize_fp8(x, scale_x, FP8_E4M3_MAX, fwd_dtype, gpu_amax=(gpu_amax if is_telemetry_step else None))
+                w_calc = w_fp8
+                s_a = inv_scale_x
+                s_b = inv_scale_w
+            else:
+                x_fp8 = x.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else x
+                w_calc = w_fp8.to(DTYPE_MAP[LEVEL_FP8]) if DTYPE_MAP[LEVEL_FP8] is not None else w_fp8
+                s_a = _get_scale_one(x.device)
+                s_b = _get_scale_one(weight.device)
+
+            out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            x_scaled = (x_fp8.to(out_dtype) * s_a.to(out_dtype)) if config.enable_dynamic_scaling else x_fp8.to(out_dtype)
+            w_scaled = (w_calc.to(out_dtype) * s_b.to(out_dtype)) if config.enable_dynamic_scaling else w_calc.to(out_dtype)
+            b_scaled = bias.to(out_dtype) if bias is not None else None
+
+            result = F.conv2d(x_scaled, w_scaled, b_scaled, stride, padding, dilation, groups)
+            ctx.save_for_backward(x_fp8, w_calc, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+
+        elif level == LEVEL_FP16:
+            dummy = _get_scale_one(x.device)
+            w_16 = weight_work if (weight_work is not None and weight_work.dtype == torch.float16) else weight.to(torch.float16)
+            b_16 = bias.to(torch.float16) if (bias is not None and bias.dtype != torch.float16) else bias
+            x_16 = x.to(torch.float16) if x.dtype != torch.float16 else x
+            ctx.save_for_backward(x_16, w_16, b_16, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            result = F.conv2d(x_16, w_16, b_16, stride, padding, dilation, groups)
+        else:  # LEVEL_TF32
+            dummy = _get_scale_one(x.device)
+            w_32 = weight.to(torch.float32) if weight.dtype != torch.float32 else weight
+            b_32 = bias.to(torch.float32) if (bias is not None and bias.dtype != torch.float32) else bias
+            x_32 = x.to(torch.float32) if x.dtype != torch.float32 else x
+            ctx.save_for_backward(x_32, w_32, b_32, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            result = F.conv2d(x_32, w_32, b_32, stride, padding, dilation, groups)
+            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            if result.dtype != target_act_dtype:
+                result = result.to(target_act_dtype)
+
+        if is_telemetry_step:
+            with torch.no_grad():
+                track_telemetry_on_tensor(result, gpu_amax, gpu_has_nonfinite)
+                if forensic_amax is not None:
+                    _update_forensic_role(
+                        result, 'output',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
+
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        saved = ctx.saved_tensors
+        x_saved, w_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad = saved
+        config = ctx.config
+        level = ctx.level
+        stride = ctx.stride
+        padding = ctx.padding
+        dilation = ctx.dilation
+        groups = ctx.groups
+        update_underflow_metric = ctx.update_underflow_metric
+        working_bwd_dtype = ctx.working_bwd_dtype
+        forensic_amax = ctx.forensic_amax
+        forensic_shape = ctx.forensic_shape
+        forensic_stats = ctx.forensic_stats
+        forensic_argmax = ctx.forensic_argmax
+
+        if ctx.is_telemetry_step:
+            with torch.no_grad():
+                if level != LEVEL_FP8 or not config.enable_dynamic_scaling:
+                    track_telemetry_on_tensor(grad_output, gpu_amax, gpu_has_nonfinite)
+                    if gpu_amax_grad is not None:
+                        track_telemetry_on_tensor(grad_output, gpu_amax_grad, gpu_has_nonfinite)
+                if forensic_amax is not None:
+                    _update_forensic_role(
+                        grad_output, 'grad_output',
+                        forensic_amax, forensic_shape, forensic_stats,
+                        config.forensic_capture_argmax_index, forensic_argmax,
+                    )
+
+        grad_input = grad_weight = grad_bias = None
+
+        if level == LEVEL_FP8:
+            bwd_dtype = working_bwd_dtype
+            v_max_bwd = FP8_E5M2_MAX if (config.use_dual_fp8 and bwd_dtype == DTYPE_BACKWARD_MAP[0]) else FP8_E4M3_MAX
+
+            if config.enable_dynamic_scaling:
+                target_bwd = bwd_dtype if bwd_dtype is not None else torch.float32
+                g_fp8 = fused_scale_clamp_quantize_fp8(grad_output, scale_grad, v_max_bwd, target_bwd, gpu_amax=(gpu_amax if ctx.is_telemetry_step else None))
+                s_g = inv_scale_grad
+                s_x = s_a
+                s_w = s_b
+            else:
+                g_fp8 = grad_output.to(bwd_dtype if bwd_dtype is not None else torch.float32)
+                s_g = _get_scale_one(grad_output.device)
+                s_x = _get_scale_one(x_saved.device)
+                s_w = _get_scale_one(w_saved.device)
+
+            calc_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            g_scaled = (g_fp8.to(calc_dtype) * s_g.to(calc_dtype)) if config.enable_dynamic_scaling else g_fp8.to(calc_dtype)
+            x_scaled = (x_saved.to(calc_dtype) * s_x.to(calc_dtype)) if config.enable_dynamic_scaling else x_saved.to(calc_dtype)
+            w_scaled = (w_saved.to(calc_dtype) * s_w.to(calc_dtype)) if config.enable_dynamic_scaling else w_saved.to(calc_dtype)
+
+            if ctx.needs_input_grad[0]:
+                grad_input = torch.nn.grad.conv2d_input(ctx.x_shape, w_scaled, g_scaled, stride, padding, dilation, groups)
+            if ctx.needs_input_grad[1]:
+                grad_weight = torch.nn.grad.conv2d_weight(x_scaled, ctx.w_shape, g_scaled, stride, padding, dilation, groups)
+            if bias is not None and ctx.needs_input_grad[2]:
+                grad_bias = grad_output.sum(dim=(0, 2, 3), dtype=torch.float32)
+        else:
+            calc_dtype = w_saved.dtype
+            g_out = grad_output.to(calc_dtype) if grad_output.dtype != calc_dtype else grad_output
+            x_saved_cast = x_saved.to(calc_dtype) if x_saved.dtype != calc_dtype else x_saved
+            if ctx.needs_input_grad[0]:
+                grad_input = torch.nn.grad.conv2d_input(ctx.x_shape, w_saved, g_out, stride, padding, dilation, groups)
+            if ctx.needs_input_grad[1]:
+                grad_weight = torch.nn.grad.conv2d_weight(x_saved_cast, ctx.w_shape, g_out, stride, padding, dilation, groups)
+            if bias is not None and ctx.needs_input_grad[2]:
+                grad_bias = grad_output.sum(dim=(0, 2, 3), dtype=torch.float32)
+
+        if grad_input is not None:
+            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            grad_input = grad_input.to(target_act_dtype)
+        if grad_weight is not None:
+            grad_weight = grad_weight.to(torch.float32)
+            if ctx.is_telemetry_step and update_underflow_metric is not None:
+                update_underflow_metric(grad_weight)
+
+            if forensic_amax is not None:
+                _update_forensic_role(
+                    grad_weight, 'grad_weight',
+                    forensic_amax, forensic_shape, forensic_stats,
+                    config.forensic_capture_argmax_index, forensic_argmax,
+                )
+        if grad_bias is not None:
+            grad_bias = grad_bias.to(torch.float32)
+
+        if grad_input is not None and forensic_amax is not None:
+            _update_forensic_role(
+                grad_input, 'grad_input',
+                forensic_amax, forensic_shape, forensic_stats,
+                config.forensic_capture_argmax_index, forensic_argmax,
+            )
+
+        return (grad_input, grad_weight, grad_bias) + (None,) * 23
+
+
+class APAConv2d(APAModule):
+    """Adaptive Precision 2D Convolution layer supporting dynamic FP8 -> FP16 -> TF32 escalation.
+
+    Supports arbitrary kernel sizes (1x1, 3x3, etc.), strides, paddings, dilations, and groups.
+    When at LEVEL_FP8, computes dynamically scaled FP8 activations and weights.
+    When at LEVEL_TF32, executes via standard PyTorch TF32 cuDNN fast-path with zero overhead.
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        stride: Union[int, Tuple[int, int]] = 1,
+        padding: Union[int, Tuple[int, int], str] = 0,
+        dilation: Union[int, Tuple[int, int]] = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: str = 'zeros',
+        config: APAConfig = APAConfig(),
+    ):
+        super().__init__(config=config)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+        self.stride = stride if isinstance(stride, tuple) else (stride, stride)
+        self.padding = padding if isinstance(padding, (tuple, str)) else (padding, padding)
+        self.dilation = dilation if isinstance(dilation, tuple) else (dilation, dilation)
+        self.groups = groups
+        self.padding_mode = padding_mode
+
+        if in_channels % groups != 0:
+            raise ValueError('in_channels must be divisible by groups')
+        if out_channels % groups != 0:
+            raise ValueError('out_channels must be divisible by groups')
+
+        self.weight_master = nn.Parameter(
+            torch.empty((out_channels, in_channels // groups, *self.kernel_size), dtype=torch.float32, device=config.device)
+        )
+        if bias:
+            self.bias_master = nn.Parameter(
+                torch.empty(out_channels, dtype=torch.float32, device=config.device)
+            )
+        else:
+            self.register_parameter('bias_master', None)
+
+        object.__setattr__(self, 'weight_work', None)
+        object.__setattr__(self, 'bias_work', None)
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight_master, a=math.sqrt(5))
+        if self.bias_master is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_master)
+            if fan_in != 0:
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(self.bias_master, -bound, bound)
+
+    @classmethod
+    def from_conv2d(cls, conv: nn.Conv2d, config: APAConfig = APAConfig(), initial_level: int = LEVEL_FP8) -> 'APAConv2d':
+        """Construct an APAConv2d module initialized with weights from an existing nn.Conv2d."""
+        apa_conv = cls(
+            in_channels=conv.in_channels,
+            out_channels=conv.out_channels,
+            kernel_size=conv.kernel_size,
+            stride=conv.stride,
+            padding=conv.padding,
+            dilation=conv.dilation,
+            groups=conv.groups,
+            bias=(conv.bias is not None),
+            padding_mode=conv.padding_mode,
+            config=config,
+        )
+        apa_conv.level = initial_level
+        if conv.weight.device != apa_conv.weight_master.device:
+            apa_conv.to(conv.weight.device)
+        with torch.no_grad():
+            apa_conv.weight_master.copy_(conv.weight.data.float())
+            if conv.bias is not None:
+                apa_conv.bias_master.copy_(conv.bias.data.float())
+        return apa_conv
+
+    def refresh_working_copy(self):
+        with torch.no_grad():
+            w_detached = self.weight_master.detach()
+            b_detached = self.bias_master.detach() if self.bias_master is not None else None
+
+            if self.level == LEVEL_FP8:
+                if self.config.enable_dynamic_scaling:
+                    fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
+                    w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
+                    object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+                    if b_detached is not None:
+                        object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
+                else:
+                    w_fp8 = w_detached.to(self.working_dtype)
+                    object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
+                    if b_detached is not None:
+                        object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+            else:
+                object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                if b_detached is not None:
+                    object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Terminal Ceiling Fast-Path:
+        if self.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
+            w = self.weight_master
+            b = self.bias_master
+            x_in = x.to(w.dtype) if x.dtype != w.dtype else x
+            out = F.conv2d(x_in, w, b, self.stride, self.padding, self.dilation, self.groups)
+            target_act_dtype = torch.float16 if getattr(self.config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            return out.to(target_act_dtype) if out.dtype != target_act_dtype else out
+
+        if self.weight_work is None:
+            self.refresh_working_copy()
+
+        # Input boundary casting: ensure input tensor is compatible with layer precision
+        if self.level == LEVEL_FP8 and self.config.enable_dynamic_scaling:
+            fp8_dtype = DTYPE_MAP.get(LEVEL_FP8, None)
+            valid_dtypes = (torch.float32, torch.float16, torch.bfloat16)
+            if fp8_dtype is not None:
+                valid_dtypes = valid_dtypes + (fp8_dtype,)
+            x_cast = x.to(torch.float32) if x.dtype not in valid_dtypes else x
+        else:
+            w_dtype = self.working_dtype
+            x_cast = x.to(w_dtype) if x.dtype != w_dtype else x
+
+        if self.config.enable_forensic_logging:
+            f_amax = self._forensic_role_amax
+            f_shape = self._forensic_last_shape
+            f_stats = self._forensic_role_stats if self.config.forensic_capture_tensor_stats else None
+            f_argmax = self._forensic_role_argmax if self.config.forensic_capture_argmax_index else None
+        else:
+            f_amax = f_shape = f_stats = f_argmax = None
+
+        return APAConv2dFunction.apply(
+            x_cast,
+            self.weight_master,
+            self.bias_master,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+            self.config,
+            self.level,
+            self.gpu_amax,
+            self.gpu_has_nonfinite,
+            self.update_underflow_metric,
+            self.working_bwd_dtype,
+            self.scale_x,
+            self.inv_scale_x,
+            self.inv_scale_w,
+            self.scale_grad,
+            self.inv_scale_grad,
+            f_amax, f_shape, f_stats, f_argmax,
+            self.is_telemetry_step,
+            self.gpu_amax_x,
+            self.gpu_amax_grad,
+            self.weight_work,
+        )

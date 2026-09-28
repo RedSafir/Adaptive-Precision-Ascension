@@ -4,7 +4,7 @@ from typing import List, Dict, Optional
 import math
 
 from .config import APAConfig, LEVEL_FP8, LEVEL_FP16, LEVEL_TF32, THRESHOLDS_MAX
-from .layers import APALinear
+from .layers import APALinear, APAConv2d, APAModule
 from .telemetry import APAEventLogger, APAForensicLogger, track_telemetry_on_tensor
 
 _LEVEL_NAME = {LEVEL_FP8: 'FP8', LEVEL_FP16: 'FP16', LEVEL_TF32: 'TF32'}
@@ -12,7 +12,7 @@ _KNOWN_ROLES = ('input_activation', 'weight', 'output', 'grad_output', 'grad_wei
 
 
 class APAManager:
-    """Manages adaptive precision escalation for a model with APALinear layers.
+    """Manages adaptive precision escalation for a model with APA layers (APALinear, APAConv2d).
 
     Responsibilities:
     - Module discovery & backward-hook registration for non-APA leaves
@@ -42,7 +42,7 @@ class APAManager:
         self.config = config
         self.step_count = 0
 
-        self.apa_modules: Dict[str, APALinear] = {}
+        self.apa_modules: Dict[str, APAModule] = {}
         self.other_modules: Dict[str, nn.Module] = {}
 
         self._global_nonfinite = torch.zeros(1, dtype=torch.int32, device=config.device)
@@ -83,7 +83,7 @@ class APAManager:
 
     def _register_modules_and_hooks(self):
         for name, module in self.model.named_modules():
-            if isinstance(module, APALinear):
+            if isinstance(module, (APALinear, APAConv2d)):
                 self.apa_modules[name] = module
             elif len(list(module.children())) == 0:
                 params = [p for p in module.parameters() if p.requires_grad]
@@ -331,7 +331,7 @@ class APAManager:
     # Escalation
     # ------------------------------------------------------------------
 
-    def _escalate_module(self, name: str, module: APALinear, reason: str, trigger_value: float):
+    def _escalate_module(self, name: str, module: APAModule, reason: str, trigger_value: float):
         """Escalate the precision level of a module.
 
         After logging the standard escalation event, if forensic logging is
@@ -341,7 +341,7 @@ class APAManager:
 
         Args:
             name: Module name (as returned by ``model.named_modules()``).
-            module: The ``APALinear`` instance to escalate.
+            module: The ``APAModule`` instance to escalate.
             reason: ``"OVERFLOW"`` or ``"SILENT_UNDERFLOW"``.
             trigger_value: The amax or EMA underflow ratio that triggered
                 escalation.
@@ -364,7 +364,7 @@ class APAManager:
     def _capture_forensic_snapshot(
         self,
         name: str,
-        module: APALinear,
+        module: APAModule,
         reason: str,
         old_level: int,
         trigger_value: float,
