@@ -53,6 +53,10 @@ class APACUDAGraphRunner:
         # Ensure optimizer supports CUDA Graph capture (PyTorch AdamW requires capturable=True)
         for group in self.optimizer.param_groups:
             group['capturable'] = True
+            if not isinstance(group['lr'], torch.Tensor):
+                group['lr'] = torch.tensor(float(group['lr']), dtype=torch.float32, device=self.device)
+            elif group['lr'].device != self.device:
+                group['lr'] = group['lr'].to(self.device)
             for p in group['params']:
                 state = self.optimizer.state.get(p, None)
                 if state is not None and 'step' in state:
@@ -87,6 +91,10 @@ class APACUDAGraphRunner:
         # Ensure optimizer supports CUDA Graph capture (PyTorch AdamW requires capturable=True)
         for group in self.optimizer.param_groups:
             group['capturable'] = True
+            if not isinstance(group['lr'], torch.Tensor):
+                group['lr'] = torch.tensor(float(group['lr']), dtype=torch.float32, device=self.device)
+            elif group['lr'].device != self.device:
+                group['lr'] = group['lr'].to(self.device)
             for p in group['params']:
                 state = self.optimizer.state.get(p, None)
                 if state is not None and 'step' in state:
@@ -98,6 +106,8 @@ class APACUDAGraphRunner:
         # Ensure current stream is synchronized
         torch.cuda.current_stream().synchronize()
         self.graph_stream.wait_stream(torch.cuda.current_stream())
+        if hasattr(torch.autograd.graph, 'set_override_stale_capture_stream'):
+            torch.autograd.graph.set_override_stale_capture_stream(True)
 
         # 2. Warmup phase on graph_stream:
         # Essential to populate PyTorch's private CUDA caching allocator pool

@@ -319,13 +319,20 @@ class APALinearFunction(torch.autograd.Function):
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
             w_16 = weight_fp8 if (weight_fp8 is not None and weight_fp8.dtype == torch.float16) else weight.to(torch.float16)
-            b_16 = bias.to(torch.float16) if bias is not None else None
-            ctx.save_for_backward(x, w_16, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
-            result = F.linear(x, w_16, b_16)
+            b_16 = bias.to(torch.float16) if (bias is not None and bias.dtype != torch.float16) else bias
+            x_16 = x.to(torch.float16) if x.dtype != torch.float16 else x
+            ctx.save_for_backward(x_16, w_16, b_16, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            result = F.linear(x_16, w_16, b_16)
         else:  # LEVEL_TF32
             dummy = _get_scale_one(x.device)
-            ctx.save_for_backward(x, weight, bias, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
-            result = F.linear(x, weight, bias)
+            w_32 = weight.to(torch.float32) if weight.dtype != torch.float32 else weight
+            b_32 = bias.to(torch.float32) if (bias is not None and bias.dtype != torch.float32) else bias
+            x_32 = x.to(torch.float32) if x.dtype != torch.float32 else x
+            ctx.save_for_backward(x_32, w_32, b_32, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            result = F.linear(x_32, w_32, b_32)
+            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            if result.dtype != target_act_dtype:
+                result = result.to(target_act_dtype)
 
         if is_telemetry_step:
             with torch.no_grad():
@@ -672,7 +679,12 @@ class APALinear(nn.Module):
         # If this layer has reached LEVEL_TF32 (maximum ceiling), it can never escalate further.
         # Bypass telemetry reductions, custom autograd Function, working copies, and grad sync.
         if self.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
-            return F.linear(x, self.weight_master, self.bias_master)
+            w = self.weight_master
+            b = self.bias_master
+            x_in = x.to(w.dtype) if x.dtype != w.dtype else x
+            out = F.linear(x_in, w, b)
+            target_act_dtype = torch.float16 if getattr(self.config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            return out.to(target_act_dtype) if out.dtype != target_act_dtype else out
 
         if self.weight_work is None:
             self.refresh_working_copy()

@@ -33,6 +33,7 @@ ENV/
 *.bin
 *.jsonl
 result/*.jsonl
+result/*.json
 examples/vit_cifar10/data/
 examples/nanogpt_char/input.txt
 

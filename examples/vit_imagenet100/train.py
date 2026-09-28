@@ -304,6 +304,7 @@ def main():
 
     for epoch in range(start_epoch, args.epochs):
         epoch_start = time.perf_counter()
+        current_lr = float(optimizer.param_groups[0]['lr'])
         model.train()
         total_train_loss = 0.0
         train_batches = 0
@@ -320,7 +321,7 @@ def main():
                 total_train_samples += images.size(0)
                 train_batches += 1
                 if batch_idx % 50 == 0:
-                    pbar.set_postfix({'loss': f"{loss_val:.4f}"})
+                    pbar.set_postfix({'loss': f"{loss_val:.4f}", 'lr': f"{current_lr:.2e}"})
                 continue
 
             if apa_manager is not None:
@@ -360,10 +361,11 @@ def main():
             pbar.set_postfix({
                 'loss': f"{loss_val:.4f}",
                 'top1': f"{top1:.1f}%",
-                'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
+                'lr': f"{current_lr:.2e}",
                 'status': 'OK' if step_accepted else 'SKIP'
             })
 
+        scheduler.step()
         divisor = total_train_samples if cuda_graph_runner is not None else train_batches
         train_loss_avg = total_train_loss / divisor if divisor > 0 else 0.0
         train_acc_avg = train_top1_sum / train_batches if train_batches > 0 else 0.0
@@ -407,9 +409,11 @@ def main():
 
         vram_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2) if device.type == 'cuda' else 0.0
 
+        train_acc_str = f" (Top-1: {train_acc_avg:.1f}%)" if cuda_graph_runner is None else ""
         print(
             f"Epoch [{epoch+1:02d}/{args.epochs:02d}] ({epoch_time:.1f}s) | "
-            f"Train Loss: {train_loss_avg:.4f} (Top-1: {train_acc_avg:.1f}%) | "
+            f"LR: {current_lr:.2e} | "
+            f"Train Loss: {train_loss_avg:.4f}{train_acc_str} | "
             f"Val Loss: {val_loss_avg:.4f} (Top-1: {val_top1_avg:.2f}%, Top-5: {val_top5_avg:.2f}%){star} | "
             f"Peak VRAM: {vram_mb:.1f} MB"
         )
@@ -476,7 +480,7 @@ def main():
             "test_loss": round(val_loss_avg, 4),
             "test_acc": round(val_top1_avg / 100.0, 4),
             "test_acc_top5": round(val_top5_avg / 100.0, 4),
-            "lr": optimizer.param_groups[0]['lr'],
+            "lr": round(current_lr, 6),
             "epoch_time_sec": round(epoch_time, 2),
             "peak_vram_mb": round(vram_mb, 1),
             "precision": args.precision,

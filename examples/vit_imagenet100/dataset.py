@@ -139,7 +139,9 @@ def get_imagenet100_loaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory and torch.cuda.is_available(),
-        drop_last=True
+        drop_last=True,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None
     )
     
     val_loader = DataLoader(
@@ -148,7 +150,9 @@ def get_imagenet100_loaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory and torch.cuda.is_available(),
-        drop_last=False
+        drop_last=False,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None
     )
     
     return train_loader, val_loader
