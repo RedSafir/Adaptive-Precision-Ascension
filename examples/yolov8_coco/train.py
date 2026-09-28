@@ -45,6 +45,7 @@ def get_args():
     parser.add_argument('--all_apa_layers', action='store_true', help="Convert all layers including Detect head to FP8")
     parser.add_argument('--forensic', action='store_true', help="Enable forensic logging on escalation events")
     parser.add_argument('--log_file', type=str, default=None, help="Path to JSONL log file")
+    parser.add_argument('--save_dir', type=str, default='runs/train_apa', help="Directory to save model checkpoints")
     parser.add_argument('--smoke_test', action='store_true', help="Run 3 steps smoke test and verify 0 errors")
     return parser.parse_args()
 
@@ -170,8 +171,20 @@ def main():
         avg_loss = epoch_loss / max(1, batches_accepted)
         print(f"Epoch {epoch + 1} Complete: Avg Loss={avg_loss:.4f} | Accepted Batches: {batches_accepted}/{len(dataloader)}")
 
+        if not args.smoke_test and args.save_dir:
+            os.makedirs(args.save_dir, exist_ok=True)
+            ckpt_path = os.path.join(args.save_dir, 'yolov8n_apa_last.pt')
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'apa_levels': {name: m.level for name, m in manager.apa_modules.items()} if manager else {}
+            }, ckpt_path)
+
     elapsed = time.time() - start_time
     print(f"\nTraining completed in {elapsed:.2f}s ({total_steps} steps).")
+    if not args.smoke_test and args.save_dir:
+        print(f"Final weights saved to: {os.path.join(args.save_dir, 'yolov8n_apa_last.pt')}")
 
 if __name__ == '__main__':
     main()
