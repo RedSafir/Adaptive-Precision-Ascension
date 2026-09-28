@@ -4,6 +4,7 @@ import argparse
 import time
 import json
 import warnings
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 
@@ -46,6 +47,9 @@ def get_args():
     parser.add_argument('--forensic', action='store_true', help="Enable forensic logging on escalation events")
     parser.add_argument('--log_file', type=str, default=None, help="Path to JSONL log file")
     parser.add_argument('--save_dir', type=str, default='runs/train_apa', help="Directory to save model checkpoints")
+    parser.add_argument('--classes', type=int, nargs='+', default=None,
+                        help="Filter dataset and model to specific class IDs (e.g. --classes 0 for player only, excluding ball)")
+    parser.add_argument('--no_save', action='store_true', help="Do not save model checkpoint .pt files (only log metrics)")
     parser.add_argument('--smoke_test', action='store_true', help="Run 3 steps smoke test and verify 0 errors")
     return parser.parse_args()
 
@@ -92,6 +96,9 @@ def main():
     cfg.device = args.device
 
     trainer = DetectionTrainer(overrides=cfg)
+    if args.classes is not None:
+        trainer.data['nc'] = len(args.classes)
+        trainer.data['names'] = {i: trainer.data['names'][c] for i, c in enumerate(args.classes)}
     trainer.setup_model()
     model = trainer.model.to(args.device)
     model.args = cfg
@@ -108,24 +115,66 @@ def main():
         params = [p for p in model.parameters() if p.requires_grad]
 
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
 
     # 3. Setup Dataset and DataLoader
     data_dict = check_det_dataset(cfg.data)
     dataset = build_yolo_dataset(cfg, data_dict['train'], batch=args.batch_size, data=data_dict, mode='train', rect=False, stride=32)
+
+    if args.classes is not None:
+        import numpy as np
+        target_classes = set(args.classes)
+        class_map = {old_c: new_c for new_c, old_c in enumerate(args.classes)}
+        removed_count = 0
+        for item in dataset.labels:
+            keep = np.array([int(c[0]) in target_classes for c in item['cls']], dtype=bool) if len(item['cls']) else np.zeros(0, dtype=bool)
+            removed_count += (~keep).sum()
+            if len(keep) > 0 and keep.any():
+                item['cls'] = np.array([[class_map[int(c[0])]] for c in item['cls'][keep]], dtype=np.float32)
+            else:
+                item['cls'] = np.zeros((0, 1), dtype=np.float32)
+            item['bboxes'] = item['bboxes'][keep]
+            if 'segments' in item and len(item['segments']) == len(keep):
+                item['segments'] = [s for s, k in zip(item['segments'], keep) if k]
+            if 'keypoints' in item and item['keypoints'] is not None:
+                item['keypoints'] = item['keypoints'][keep]
+        print(f"Filtered dataset to class(es) {args.classes} ({trainer.data['names']}): removed {removed_count} annotations outside selected classes.")
+
     dataloader = build_dataloader(dataset, batch=args.batch_size, workers=args.workers, shuffle=True)
     print(f"Dataset loaded: {len(dataset)} images, {len(dataloader)} batches per epoch.")
 
     # 4. Training Loop
+    if args.log_file:
+        log_dir = os.path.dirname(os.path.abspath(args.log_file))
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(args.log_file, 'w', encoding='utf-8') as f:
+            header_data = {
+                "model": args.model,
+                "dataset": args.data,
+                "mode": args.precision,
+                "classes": args.classes,
+                "args": vars(args),
+                "config": config.__dict__ if config is not None else {"precision": args.precision}
+            }
+            f.write(json.dumps(header_data) + "\n")
+        print(f"Metrics will be logged to JSONL: {args.log_file}")
+
     model.train()
     total_steps = 0
     start_time = time.time()
 
     for epoch in range(args.epochs):
         print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
+        epoch_start = time.time()
         epoch_loss = 0.0
+        epoch_box_loss = 0.0
+        epoch_cls_loss = 0.0
+        epoch_dfl_loss = 0.0
         batches_accepted = 0
 
-        for step, batch in enumerate(dataloader):
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}", dynamic_ncols=True)
+        for step, batch in enumerate(pbar):
             if manager is not None:
                 manager.pre_step()
             optimizer.zero_grad()
@@ -147,44 +196,92 @@ def main():
                 optimizer.step()
                 batches_accepted += 1
                 epoch_loss += total_loss.item()
+                if isinstance(loss_items, dict):
+                    epoch_box_loss += loss_items.get('box_loss', torch.tensor(0.0)).item()
+                    epoch_cls_loss += loss_items.get('cls_loss', torch.tensor(0.0)).item()
+                    epoch_dfl_loss += loss_items.get('dfl_loss', torch.tensor(0.0)).item()
             else:
-                print(f"  [Step {step}] Batch rejected due to overflow. Precision escalated.")
+                pbar.write(f"  [Step {step}] Batch rejected due to overflow. Precision escalated.")
 
             total_steps += 1
 
-            if step % 5 == 0 or args.smoke_test:
+            postfix = {
+                'loss': f"{total_loss.item():.3f}",
+                'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
+            }
+            if isinstance(loss_items, dict):
+                if 'box_loss' in loss_items:
+                    postfix['box'] = f"{loss_items['box_loss'].item():.2f}"
+                if 'cls_loss' in loss_items:
+                    postfix['cls'] = f"{loss_items['cls_loss'].item():.2f}"
+            if manager is not None:
                 level_dist = {}
-                if manager is not None:
-                    for m in manager.apa_modules.values():
-                        level_dist[m.level] = level_dist.get(m.level, 0) + 1
-                    level_str = f"Levels: FP8={level_dist.get(0, 0)}, FP16={level_dist.get(1, 0)}, TF32={level_dist.get(2, 0)}"
-                else:
-                    level_str = "FP32"
-
-                items_str = " | ".join([f"{k}: {v.item():.3f}" for k, v in loss_items.items()])
-                print(f"Step {step}/{len(dataloader)}: Total Loss={total_loss.item():.4f} ({items_str}) | {level_str}")
+                for m in manager.apa_modules.values():
+                    level_dist[m.level] = level_dist.get(m.level, 0) + 1
+                postfix['levels'] = f"F8:{level_dist.get(0, 0)}/F16:{level_dist.get(1, 0)}/TF:{level_dist.get(2, 0)}"
+            pbar.set_postfix(postfix)
 
             if args.smoke_test and total_steps >= 3:
+                if args.log_file:
+                    with open(args.log_file, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            "event": "smoke_test_complete",
+                            "steps": total_steps,
+                            "last_loss": round(total_loss.item(), 4),
+                            "status": "passed"
+                        }) + "\n")
                 print("\n[SMOKE TEST PASSED] Verified 3 steps with 0 errors!")
                 return
 
         avg_loss = epoch_loss / max(1, batches_accepted)
-        print(f"Epoch {epoch + 1} Complete: Avg Loss={avg_loss:.4f} | Accepted Batches: {batches_accepted}/{len(dataloader)}")
+        scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+        epoch_time = time.time() - epoch_start
+        print(f"Epoch {epoch + 1} Complete: Avg Loss={avg_loss:.4f} | LR={current_lr:.6f} | Accepted Batches: {batches_accepted}/{len(dataloader)} | Time: {epoch_time:.2f}s")
 
-        if not args.smoke_test and args.save_dir:
+        if args.log_file:
+            record = {
+                "epoch": epoch + 1,
+                "train_loss": round(avg_loss, 4),
+                "box_loss": round(epoch_box_loss / max(1, batches_accepted), 4),
+                "cls_loss": round(epoch_cls_loss / max(1, batches_accepted), 4),
+                "dfl_loss": round(epoch_dfl_loss / max(1, batches_accepted), 4),
+                "lr": round(current_lr, 6),
+                "epoch_time_sec": round(epoch_time, 2),
+                "precision": args.precision,
+                "mode": args.precision
+            }
+            if manager is not None:
+                level_dist = {}
+                for m in manager.apa_modules.values():
+                    level_dist[m.level] = level_dist.get(m.level, 0) + 1
+                record["precision_distribution"] = {
+                    "fp8": level_dist.get(0, 0),
+                    "fp16": level_dist.get(1, 0),
+                    "tf32": level_dist.get(2, 0),
+                }
+            with open(args.log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(record) + "\n")
+
+        if not args.smoke_test and not args.no_save and args.save_dir:
             os.makedirs(args.save_dir, exist_ok=True)
-            ckpt_path = os.path.join(args.save_dir, 'yolov8n_apa_last.pt')
+            ckpt_name = f'yolov8n_{args.precision}_last.pt'
+            ckpt_path = os.path.join(args.save_dir, ckpt_name)
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'apa_levels': {name: m.level for name, m in manager.apa_modules.items()} if manager else {}
             }, ckpt_path)
 
     elapsed = time.time() - start_time
     print(f"\nTraining completed in {elapsed:.2f}s ({total_steps} steps).")
-    if not args.smoke_test and args.save_dir:
-        print(f"Final weights saved to: {os.path.join(args.save_dir, 'yolov8n_apa_last.pt')}")
+    if not args.smoke_test and not args.no_save and args.save_dir:
+        ckpt_name = f'yolov8n_{args.precision}_last.pt'
+        print(f"Final weights saved to: {os.path.join(args.save_dir, ckpt_name)}")
+    if args.log_file:
+        print(f"Final JSONL metrics saved to: {args.log_file}")
 
 if __name__ == '__main__':
     main()
