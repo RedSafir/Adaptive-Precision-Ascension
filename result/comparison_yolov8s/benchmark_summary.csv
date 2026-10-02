@@ -1,0 +1,9 @@
+Metric,APA,Pure FP32 Baseline
+Final Train Accuracy,-,-
+Final Test Accuracy,-,-
+Peak Test Accuracy,-,-
+Final Train Loss,41.2032,39.3708
+Final Test Loss,-,-
+Avg Time / Epoch,327.39s,349.97s
+Total Training Time,272.82 min,291.64 min
+Speedup Multiplier,1.07x Faster,1.00x (Ref)

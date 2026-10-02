@@ -51,4 +51,4 @@ runs/
 *.swp
 .DS_Store
 Thumbs.db
-result/
+!result/*.md
