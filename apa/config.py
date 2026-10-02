@@ -99,9 +99,15 @@ class APAConfig:
     # element via torch.argmax — extra overhead per tensor, keep False unless
     # you need precise element-level debug info.
     forensic_capture_tensor_stats: bool = True   # capture mean/std alongside amax
-    # (cheap extra ops, True by default when forensic mode is on)
     telemetry_log_interval: int = 0              # Periodic step interval to log per-layer
     # amax and underflow ratio time series (0 = disabled, e.g. 50 = every 50 steps)
+
+    # ---------------------------------------------------------------------------
+    # Frobenius Norm Telemetry & Instability Diagnostics (opt-in, disabled by default)
+    # ---------------------------------------------------------------------------
+    enable_frobenius_telemetry: bool = False   # Opt-in trigger for Frobenius norm diagnostic telemetry
+    frobenius_check_interval: int = 4         # Evaluation step interval for Frobenius telemetry
+    frobenius_log_file: Optional[str] = None  # Auto-derived if None when enabled
 
     def __post_init__(self):
         if DTYPE_MAP[0] is None:
@@ -117,6 +123,17 @@ class APAConfig:
                 )
             else:
                 self.forensic_log_file = 'apa_forensic.jsonl'
+
+        # Auto-derive frobenius_log_file so callers never get a silent no-op.
+        if self.enable_frobenius_telemetry and self.frobenius_log_file is None:
+            if self.log_file is not None:
+                base = self.log_file.rsplit('.', 1)
+                self.frobenius_log_file = (
+                    base[0] + '_frobenius.jsonl' if len(base) == 2
+                    else self.log_file + '_frobenius.jsonl'
+                )
+            else:
+                self.frobenius_log_file = 'apa_frobenius.jsonl'
 
     @classmethod
     def conservative(cls, **kwargs):

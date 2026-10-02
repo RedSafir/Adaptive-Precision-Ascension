@@ -3,6 +3,7 @@ from .layers import APALinear, APAConv2d, APAModule, APABoundaryCast
 from .manager import APAManager
 from .telemetry import APAForensicLogger
 from .cuda_graph import APACUDAGraphRunner
+from .diagnostics import FrobeniusTelemetry
 
 __version__ = "0.1.0"
 
@@ -15,5 +16,6 @@ __all__ = [
     "APAManager",
     "APAForensicLogger",
     "APACUDAGraphRunner",
+    "FrobeniusTelemetry",
     "__version__"
 ]

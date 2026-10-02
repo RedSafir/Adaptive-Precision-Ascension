@@ -77,6 +77,13 @@ class APAManager:
             self.forensic_logger = APAForensicLogger(config.forensic_log_file)
             self._register_forensic_forward_hooks()
 
+        # Frobenius norm diagnostic telemetry (opt-in) ---------------------
+        self.frobenius_telemetry = None
+        if config.enable_frobenius_telemetry:
+            from .diagnostics import FrobeniusTelemetry
+            self.frobenius_telemetry = FrobeniusTelemetry(config=config, model=model)
+            self.frobenius_telemetry.evaluate_at_initialization(model)
+
     # ------------------------------------------------------------------
     # Module & hook registration
     # ------------------------------------------------------------------
@@ -352,9 +359,16 @@ class APAManager:
         if old_level < LEVEL_TF32:
             module.level += 1
             module.ema_underflow_ratio = 0.0
+            extra_meta = None
+            if self.frobenius_telemetry is not None:
+                outlier_info = self.frobenius_telemetry.get_module_outlier_info(name)
+                if outlier_info is not None:
+                    extra_meta = {"frobenius_anomaly": outlier_info}
+
             self.logger.log_escalation(
                 self.step_count, name, reason,
-                old_level, module.level, trigger_value
+                old_level, module.level, trigger_value,
+                extra=extra_meta
             )
 
             # Forensic snapshot — only when mode is active
@@ -477,6 +491,13 @@ class APAManager:
     def post_backward_sync_and_eval(self) -> bool:
         self.step_count += 1
         self._sync_grads_to_master()
+
+        # Frobenius norm diagnostic telemetry (opt-in)
+        if self.frobenius_telemetry is not None and (self.step_count % self.config.frobenius_check_interval == 0):
+            with torch.no_grad():
+                metrics = self.frobenius_telemetry.collect_step_metrics(self.model, self.step_count)
+                eval_res = self.frobenius_telemetry.evaluate_instability(self.step_count, metrics)
+                self.frobenius_telemetry.log_step(self.step_count, eval_res)
 
         if self.config.freeze_level is not None:
             return True

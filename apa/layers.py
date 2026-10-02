@@ -261,6 +261,9 @@ class APALinearFunction(torch.autograd.Function):
                         config.forensic_capture_argmax_index, forensic_argmax,
                     )
 
+        s_a = inv_scale_x
+        s_b = inv_scale_w
+
         if level == LEVEL_FP8:
             w_fp8 = weight_fp8 if weight_fp8 is not None else weight
             if not _is_compiling() and not config.fp8_simulation_mode and APA_CUDA_AVAILABLE and hasattr(apa_cuda, 'fused_linear_forward') and x.is_cuda and not config.enable_forensic_logging:
@@ -274,7 +277,7 @@ class APALinearFunction(torch.autograd.Function):
                 )
 
                 w_bwd_saved = weight_bwd if weight_bwd is not None else w_fp8.t().contiguous().t()
-                ctx.save_for_backward(x_fp8, w_bwd_saved, bias, inv_scale_x, inv_scale_w, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+                ctx.save_for_backward(x_fp8, w_bwd_saved, bias)
             else:
                 if config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
@@ -290,7 +293,7 @@ class APALinearFunction(torch.autograd.Function):
                     s_b = _get_scale_one(w_calc.device)
 
                 if config.fp8_simulation_mode or DTYPE_MAP[LEVEL_FP8] is None:
-                    ctx.save_for_backward(x_fp8, w_calc, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+                    ctx.save_for_backward(x_fp8, w_calc, bias)
                     if config.enable_dynamic_scaling:
                         result = F.linear(x_fp8.float() * s_a, w_calc.float() * s_b, bias.float() if bias is not None else None)
                     else:
@@ -316,24 +319,37 @@ class APALinearFunction(torch.autograd.Function):
                     # Pre-format tensors for zero-redundancy, zero-copy backward pass:
                     w_bwd_saved = weight_bwd if weight_bwd is not None else w_calc.t().contiguous().t()
                     x_saved_bwd = x_2d.t().contiguous().t()
-                    ctx.save_for_backward(x_saved_bwd, w_bwd_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+                    ctx.save_for_backward(x_saved_bwd, w_bwd_saved, bias)
         elif level == LEVEL_FP16:
             dummy = _get_scale_one(x.device)
+            s_a = s_b = scale_grad = inv_scale_grad = dummy
             w_16 = weight_fp8 if (weight_fp8 is not None and weight_fp8.dtype == torch.float16) else weight.to(torch.float16)
             b_16 = bias.to(torch.float16) if (bias is not None and bias.dtype != torch.float16) else bias
             x_16 = x.to(torch.float16) if x.dtype != torch.float16 else x
-            ctx.save_for_backward(x_16, w_16, b_16, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            ctx.save_for_backward(x_16, w_16, b_16)
             result = F.linear(x_16, w_16, b_16)
+            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            if result.dtype != target_act_dtype:
+                result = result.to(target_act_dtype)
         else:  # LEVEL_TF32
             dummy = _get_scale_one(x.device)
+            s_a = s_b = scale_grad = inv_scale_grad = dummy
             w_32 = weight.to(torch.float32) if weight.dtype != torch.float32 else weight
             b_32 = bias.to(torch.float32) if (bias is not None and bias.dtype != torch.float32) else bias
             x_32 = x.to(torch.float32) if x.dtype != torch.float32 else x
-            ctx.save_for_backward(x_32, w_32, b_32, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
+            ctx.save_for_backward(x_32, w_32, b_32)
             result = F.linear(x_32, w_32, b_32)
             target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
             if result.dtype != target_act_dtype:
                 result = result.to(target_act_dtype)
+
+        ctx.s_a = s_a
+        ctx.s_b = s_b
+        ctx.scale_grad = scale_grad
+        ctx.inv_scale_grad = inv_scale_grad
+        ctx.gpu_amax = gpu_amax
+        ctx.gpu_has_nonfinite = gpu_has_nonfinite
+        ctx.gpu_amax_grad = gpu_amax_grad
 
         if is_telemetry_step:
             with torch.no_grad():
@@ -350,7 +366,14 @@ class APALinearFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         saved = ctx.saved_tensors
-        x_saved, w_saved, bias, s_a, s_b, scale_grad, inv_scale_grad, gpu_amax, gpu_has_nonfinite, gpu_amax_grad = saved
+        x_saved, w_saved, bias = saved
+        s_a = ctx.s_a
+        s_b = ctx.s_b
+        scale_grad = ctx.scale_grad
+        inv_scale_grad = ctx.inv_scale_grad
+        gpu_amax = ctx.gpu_amax
+        gpu_has_nonfinite = ctx.gpu_has_nonfinite
+        gpu_amax_grad = ctx.gpu_amax_grad
         config = ctx.config
         level = ctx.level
         update_underflow_metric = ctx.update_underflow_metric
@@ -529,6 +552,14 @@ class APAModule(nn.Module):
         self._forensic_last_shape: dict = {}   # role -> list[int]
         self._forensic_role_stats: dict = {}   # role -> {mean, std} or empty
         self._forensic_role_argmax: dict = {}  # role -> int (flat index) or empty
+
+    @property
+    def weight(self):
+        return getattr(self, 'weight_master', None)
+
+    @property
+    def bias(self):
+        return getattr(self, 'bias_master', None)
 
     @property
     def working_dtype(self):

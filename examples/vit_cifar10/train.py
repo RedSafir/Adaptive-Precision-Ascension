@@ -25,8 +25,8 @@ from model import VisionTransformer
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train Vision Transformer on CIFAR-10 with APA or pure FP32 baseline.")
-    parser.add_argument('--precision', type=lambda s: s.lower(), default=None, choices=['apa', 'fp8', 'fp16', 'fp16_apa', 'tf32', 'fp32'],
-                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton), 'fp16' (Mixed Precision AMP), 'fp16_apa' (Controlled FP16 via APALinear), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
+    parser.add_argument('--precision', type=lambda s: s.lower(), default=None, choices=['apa', 'fp8', 'fp16', 'tf32', 'fp32'],
+                        help="Precision mode: 'apa' (Adaptive), 'fp8' (Fixed FP8 via Triton), 'fp16' (Custom FP16 via APALinear Level 1, without AMP), 'tf32' (Standard TF32 FP32), or 'fp32' (Strict IEEE 754 Single Precision)")
     parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size")
     parser.add_argument('--lr', type=float, default=1e-3, help="Initial learning rate")
@@ -55,6 +55,12 @@ def get_args():
     parser.add_argument('--image_size', type=int, default=32, help="Image resolution (e.g. 32, 224)")
     parser.add_argument('--patch_size', type=int, default=4, help="Patch size (e.g. 4 for 32x32, 16 for 224x224)")
     parser.add_argument('--num_classes', type=int, default=10, help="Number of output classes (e.g. 10, 100, 1000)")
+    parser.add_argument('--enable_frobenius_telemetry', action='store_true',
+                        help="Enable Frobenius norm diagnostic telemetry (optional feature)")
+    parser.add_argument('--frobenius_check_interval', type=int, default=4,
+                        help="Step interval for Frobenius telemetry evaluation")
+    parser.add_argument('--frobenius_log_file', type=str, default=None,
+                        help="Path to Frobenius JSONL log file")
     return parser.parse_args()
 
 def main():
@@ -63,22 +69,16 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     freeze_level = None
-    use_amp = False
     if args.precision == 'fp8':
         use_apa = True
         freeze_level = LEVEL_FP8
         mode_str = "Pure FP8 (Fixed Level 0 with Native Triton Kernel)"
         math_mode = "FP8 E4M3/E5M2 Tensor Cores"
-    elif args.precision == 'fp16_apa':
+    elif args.precision == 'fp16':
         use_apa = True
         freeze_level = LEVEL_FP16
-        mode_str = "Controlled FP16 (APALinear Level 1, Isolated Bit-Width Benchmark)"
+        mode_str = "Custom FP16 (APALinear Level 1, Isolated Bit-Width, No AMP)"
         math_mode = "FP16 Half Precision via APALinear"
-    elif args.precision == 'fp16':
-        use_apa = False
-        use_amp = True
-        mode_str = "Pure FP16 (Automatic Mixed Precision AMP)"
-        math_mode = "FP16 Half Precision Tensor Cores"
     elif args.precision == 'tf32':
         use_apa = False
         args.strict_fp32 = False
@@ -144,8 +144,8 @@ def main():
             transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ])
         transform_test = transforms.Compose([
-            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.ToTensor(),
-            transforms.ToTensor() if args.image_size == 32 else transforms.Lambda(lambda x: x),
+            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.Lambda(lambda x: x),
+            transforms.ToTensor(),
             transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ])
         os.makedirs(data_dir, exist_ok=True)
@@ -159,8 +159,8 @@ def main():
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
         ])
         transform_test = transforms.Compose([
-            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.ToTensor(),
-            transforms.ToTensor() if args.image_size == 32 else transforms.Lambda(lambda x: x),
+            transforms.Resize(args.image_size) if args.image_size != 32 else transforms.Lambda(lambda x: x),
+            transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
         ])
         os.makedirs(data_dir, exist_ok=True)
@@ -188,6 +188,9 @@ def main():
             'use_dual_fp8': not args.no_dual_fp8,
             'interval_telemetry': args.interval_telemetry,
             'freeze_level': freeze_level,
+            'enable_frobenius_telemetry': args.enable_frobenius_telemetry,
+            'frobenius_check_interval': args.frobenius_check_interval,
+            'frobenius_log_file': args.frobenius_log_file,
         }
         if args.theta_underflow is not None:
             config_kwargs['theta_underflow'] = args.theta_underflow
@@ -259,11 +262,7 @@ def main():
         else:
             print("[WARN: torch.compile not available in this PyTorch version]\n")
 
-    # Optimizer & Scheduler & Scaler
-    if hasattr(torch.amp, 'GradScaler'):
-        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
-    else:
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    # Optimizer & Scheduler
     opt_kwargs = {'lr': args.lr, 'weight_decay': 0.05}
     if getattr(args, 'cuda_graph', False):
         opt_kwargs['capturable'] = True
@@ -276,7 +275,6 @@ def main():
         sample_batch = next(iter(train_loader))
         sx = sample_batch[0].to(device, non_blocking=True)
         sy = sample_batch[1].to(device, non_blocking=True)
-        autocast_dt = torch.float16 if (use_amp or use_apa) else None
         cuda_graph_runner = APACUDAGraphRunner(
             model=model,
             optimizer=optimizer,
@@ -284,7 +282,7 @@ def main():
             sample_y=sy,
             apa_manager=apa_manager,
             loss_fn=F.cross_entropy,
-            autocast_dtype=autocast_dt,
+            autocast_dtype=None,
             warmup_steps=3,
         )
         print(" Done. (0-freeze compiled execution ready!)\n")
@@ -323,26 +321,17 @@ def main():
                 apa_manager.pre_step()
                 
             optimizer.zero_grad(set_to_none=True)
+            out = model(x)
+            loss = F.cross_entropy(out, y)
+            loss.backward()
             
-            if use_amp:
-                with torch.amp.autocast('cuda', dtype=torch.float16):
-                    out = model(x)
-                    loss = F.cross_entropy(out, y)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                out = model(x)
-                loss = F.cross_entropy(out, y)
-                loss.backward()
-                
-                if apa_manager is not None:
-                    if apa_manager.post_backward_sync_and_eval():
-                        optimizer.step()
-                    else:
-                        optimizer.zero_grad(set_to_none=True)
-                else:
+            if apa_manager is not None:
+                if apa_manager.post_backward_sync_and_eval():
                     optimizer.step()
+                else:
+                    optimizer.zero_grad(set_to_none=True)
+            else:
+                optimizer.step()
                 
             total_loss += loss.item() * x.size(0)
             preds = out.argmax(dim=-1)
@@ -363,11 +352,7 @@ def main():
         with torch.no_grad():
             for x, y in test_loader:
                 x, y = x.to(device), y.to(device)
-                if use_amp:
-                    with torch.amp.autocast('cuda', dtype=torch.float16):
-                        out = model(x)
-                else:
-                    out = model(x)
+                out = model(x)
                 loss = F.cross_entropy(out, y)
                 test_loss += loss.item() * x.size(0)
                 preds = out.argmax(dim=-1)

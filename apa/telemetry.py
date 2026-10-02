@@ -57,8 +57,8 @@ class APAEventLogger:
             except Exception as e:
                 print(f"Failed to write to APA log file {self.log_file}: {e}")
 
-    def log_escalation(self, step: int, module_name: str, reason: str, old_level: int, new_level: int, trigger_value: float):
-        self._log_event({
+    def log_escalation(self, step: int, module_name: str, reason: str, old_level: int, new_level: int, trigger_value: float, extra: Optional[dict] = None):
+        payload = {
             "event": "escalation",
             "step": step,
             "module": module_name,
@@ -66,7 +66,10 @@ class APAEventLogger:
             "old_level": old_level,
             "new_level": new_level,
             "trigger_value": float(trigger_value)
-        })
+        }
+        if extra:
+            payload.update(extra)
+        self._log_event(payload)
 
     def log_skip_batch(self, step: int, reason: str, trigger_modules: list):
         self._log_event({
