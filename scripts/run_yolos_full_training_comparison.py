@@ -5,7 +5,7 @@ import json
 import argparse
 import subprocess
 
-def run_experiment(precision: str, epochs: int, batch_size: int, max_steps: int, save_dir: str):
+def run_experiment(precision: str, epochs: int, batch_size: int, max_steps: int, classes: list, save_dir: str):
     log_file = os.path.join(save_dir, f"yolos_{precision}_train.jsonl")
     cmd = [
         "/home/ictlab/miniconda3/envs/apa/bin/python",
@@ -21,6 +21,8 @@ def run_experiment(precision: str, epochs: int, batch_size: int, max_steps: int,
         "--log_file", log_file,
         "--save_dir", save_dir
     ]
+    if classes is not None:
+        cmd.extend(["--classes"] + [str(c) for c in classes])
     if max_steps > 0:
         cmd.extend(["--max_steps", str(max_steps)])
 
@@ -69,6 +71,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=1, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=16, help="Batch size per step")
     parser.add_argument('--max_steps', type=int, default=0, help="Max steps per epoch (0 = full 1,970 steps epoch)")
+    parser.add_argument('--classes', type=int, nargs='+', default=None, help="Filter to specific classes (e.g. --classes 0)")
     parser.add_argument('--save_dir', type=str, default='runs/yolos_full_training', help="Output directory")
     args = parser.parse_args()
 
@@ -77,7 +80,7 @@ def main():
 
     print("\n" + "#" * 85)
     print("  COMPARATIVE FULL TRAINING BENCHMARK: YOLOS OBJECT DETECTION")
-    print("  Dataset: merged_yolo_person_ball (31,528 images, Person & Ball)")
+    print(f"  Dataset: merged_yolo_person_ball (31,528 images, Classes: {args.classes if args.classes else 'All'})")
     print("  Models: Pure FP32 Baseline vs APA FP8 Custom Fused Engine")
     print("#" * 85 + "\n")
 
@@ -87,6 +90,7 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         max_steps=args.max_steps,
+        classes=args.classes,
         save_dir=args.save_dir
     )
 
@@ -96,6 +100,7 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         max_steps=args.max_steps,
+        classes=args.classes,
         save_dir=args.save_dir
     )
 

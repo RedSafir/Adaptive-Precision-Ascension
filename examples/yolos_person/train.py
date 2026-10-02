@@ -38,6 +38,8 @@ def get_args():
     parser.add_argument('--max_steps', type=int, default=0, help="Max steps per epoch (0 = full epoch)")
     parser.add_argument('--log_file', type=str, default=None, help="Path to save JSONL training log")
     parser.add_argument('--save_dir', type=str, default='runs/train_yolos_person', help="Directory to save checkpoints")
+    parser.add_argument('--classes', type=int, nargs='+', default=None,
+                        help="Filter dataset and model to specific class IDs (e.g. --classes 0 for person only)")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument('--no_save', action='store_true', help="Disable saving checkpoint weights")
     return parser.parse_args()
@@ -103,9 +105,10 @@ def main():
     print(f"[*] Hardware Precision Config: {mode_desc}")
 
     # 2. Build Model
+    num_labels = len(args.classes) if args.classes is not None else 2
     model = create_yolos_model(
         model_name=args.model,
-        num_labels=2, # person, ball
+        num_labels=num_labels,
         img_size=args.imgsz,
         pretrained=True
     ).to(device)
@@ -148,6 +151,7 @@ def main():
         img_size=args.imgsz,
         shuffle=True,
         num_workers=args.workers,
+        class_filter=args.classes,
         max_samples=None
     )
 

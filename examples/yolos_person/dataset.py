@@ -24,6 +24,7 @@ class YoloPersonBallDataset(Dataset):
         self.label_dir = label_dir
         self.img_size = img_size
         self.class_filter = set(class_filter) if class_filter is not None else None
+        self.class_to_idx = {c: i for i, c in enumerate(class_filter)} if class_filter is not None else None
 
         valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp')
         all_files = sorted(os.listdir(img_dir))
@@ -77,8 +78,10 @@ class YoloPersonBallDataset(Dataset):
                     parts = line.strip().split()
                     if len(parts) >= 5:
                         cls_id = int(parts[0])
-                        if self.class_filter is not None and cls_id not in self.class_filter:
-                            continue
+                        if self.class_filter is not None:
+                            if cls_id not in self.class_filter:
+                                continue
+                            cls_id = self.class_to_idx[cls_id]
                         cx, cy, w, h = map(float, parts[1:5])
                         # Clamp normalized box coordinates to [0, 1]
                         cx = min(max(cx, 0.0), 1.0)
