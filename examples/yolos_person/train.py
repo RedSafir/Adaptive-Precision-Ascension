@@ -30,8 +30,8 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate for AdamW")
     parser.add_argument('--weight_decay', type=float, default=1e-4, help="Weight decay")
     parser.add_argument('--precision', type=str, default='apa_fp8',
-                        choices=['fp32', 'apa_fp8', 'apa', 'fp16', 'amp', 'amp_fp16', 'tf32'],
-                        help="Precision engine: 'fp32' (Pure FP32), 'apa_fp8' (APA FP8 Custom Fused), 'apa' (Adaptive FP8->FP16->TF32), 'fp16' (APA Fixed FP16 Custom), 'amp' / 'amp_fp16' (PyTorch Native AMP FP16 autocast + GradScaler)")
+                        choices=['fp32', 'apa_fp8', 'apa', 'apa_bf', 'apa_fp8_bf', 'fp16', 'amp', 'amp_fp16', 'tf32'],
+                        help="Precision engine: 'fp32' (Pure FP32), 'apa_fp8' (APA FP8 Custom Fused), 'apa' (Adaptive FP8->FP16->TF32), 'apa_bf' (Adaptive APA with FP8_bf & No Delayed Scaling), 'apa_fp8_bf' (Fixed FP8_bf & No Delayed Scaling), 'fp16' (APA Fixed FP16), 'amp' / 'amp_fp16' (PyTorch Native AMP)")
     parser.add_argument('--apa_preset', type=str, default='research', choices=['research', 'conservative', 'aggressive'])
     parser.add_argument('--check_interval', type=int, default=1, help="Evaluation interval for soft checks in APA")
     parser.add_argument('--workers', type=int, default=4, help="Number of DataLoader worker processes")
@@ -101,6 +101,12 @@ def main():
         use_apa = True
         freeze_level = LEVEL_FP16
         mode_desc = "APA Fixed FP16 (Custom APALinear, NO AMP)"
+    elif args.precision in ('apa_bf', 'apa_fp8_bf'):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        use_apa = True
+        freeze_level = LEVEL_FP8 if args.precision == 'apa_fp8_bf' else None
+        mode_desc = f"APA_bf {'Fixed FP8_bf' if freeze_level is not None else 'Adaptive Precision (FP8_bf -> FP16 -> TF32)'} (No Delayed Scaling, BF16 Output Accumulator)"
     elif args.precision in ('amp', 'amp_fp16'):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -138,7 +144,11 @@ def main():
         apa_cfg.device = 'cuda'
         apa_cfg.check_interval = args.check_interval
         apa_cfg.freeze_level = freeze_level
-        apa_cfg.fp8_output_dtype = 'float16'
+        if 'bf' in args.precision:
+            apa_cfg.fp8_output_dtype = 'bfloat16'
+            apa_cfg.enable_dynamic_scaling = False
+        else:
+            apa_cfg.fp8_output_dtype = 'float16'
         if args.log_file:
             apa_cfg.log_file = args.log_file.replace('.jsonl', '_apa_events.jsonl')
 

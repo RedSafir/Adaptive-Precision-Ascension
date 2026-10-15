@@ -152,3 +152,29 @@ class APAConfig:
         config_kwargs = dict(gamma=0.90, theta_underflow=0.40, check_interval=4)
         config_kwargs.update(kwargs)
         return cls(**config_kwargs)
+
+    @classmethod
+    def apa_bf(cls, **kwargs):
+        """Variant APA_bf: FP8_bf mode (BF16 output accumulator) without delayed scaling, adaptive ascension."""
+        config_kwargs = dict(
+            fp8_output_dtype='bfloat16',
+            enable_dynamic_scaling=False,
+            gamma=0.90,
+            theta_underflow=0.40,
+            check_interval=4
+        )
+        config_kwargs.update(kwargs)
+        return cls(**config_kwargs)
+
+    @classmethod
+    def apa_fp8_bf(cls, **kwargs):
+        """Variant APA_fp8_bf: Fixed FP8_bf mode (BF16 output accumulator) without delayed scaling."""
+        config_kwargs = dict(
+            fp8_output_dtype='bfloat16',
+            enable_dynamic_scaling=False,
+            freeze_level=LEVEL_FP8,
+            check_interval=1
+        )
+        config_kwargs.update(kwargs)
+        return cls(**config_kwargs)
+
