@@ -42,10 +42,10 @@ def parse_args():
     parser.add_argument('--patch_size', type=int, default=4, help="Patch size (default: 4 for CIFAR, 16 for ImageNet)")
     parser.add_argument('--num_classes', type=int, default=10, help="Number of output classes (default: 10, 100 for ImageNet-100)")
     parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate (default: 1e-3)")
-    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp16', 'tf32', 'fp32', 'apa'],
-                        choices=['fp8', 'fp16', 'fp16_apa', 'amp_fp16', 'tf32', 'fp32', 'apa'],
+    parser.add_argument('--methods', nargs='+', default=['fp8', 'fp8_bf', 'fp16', 'tf32', 'fp32', 'apa'],
+                        choices=['fp8', 'fp8_bf', 'fp16', 'fp16_apa', 'amp_fp16', 'amp_bf16', 'tf32', 'fp32', 'apa'],
                         type=lambda s: 'fp8' if s.lower() == 'fp8_fast' else s.lower(),
-                        help="Methods to benchmark (default: fp8 fp16 tf32 fp32 apa, can include fp16_apa, amp_fp16)")
+                        help="Methods to benchmark (default: fp8 fp8_bf fp16 tf32 fp32 apa, can include fp16_apa, amp_fp16, amp_bf16)")
     parser.add_argument('--dataset', type=str, default='auto',
                         choices=['auto', 'synthetic', 'cifar10', 'cifar100', 'imagenet', 'imagefolder'],
                         help="Dataset type: 'synthetic', 'cifar10', 'cifar100', 'imagenet' (ImageFolder at data_dir)")
@@ -174,6 +174,11 @@ def benchmark_single_method(method, args, data_batches):
         freeze_level = None
         use_amp = True
         backend_desc = "PyTorch AMP FP16 Tensor Cores"
+    elif method == 'amp_bf16':
+        use_apa = False
+        freeze_level = None
+        use_amp = True
+        backend_desc = "PyTorch AMP BF16 Tensor Cores (No Scaler)"
     elif method == 'fp16_apa':
         use_apa = True
         freeze_level = LEVEL_FP16
@@ -185,7 +190,13 @@ def benchmark_single_method(method, args, data_batches):
         freeze_level = LEVEL_FP8
         use_amp = False
         fp8_output_dtype = 'float16'
-        backend_desc = "Native FP8 (E4M3/E5M2 Tensor Cores)"
+        backend_desc = "Native FP8 (FP16 Output Accumulator)"
+    elif method in ('fp8_bf', 'fp8_bfloat16'):
+        use_apa = True
+        freeze_level = LEVEL_FP8
+        use_amp = False
+        fp8_output_dtype = 'bfloat16'
+        backend_desc = "Native FP8_BF (BF16 Output Accumulator)"
     elif method == 'apa':
         use_apa = True
         freeze_level = None
@@ -237,10 +248,11 @@ def benchmark_single_method(method, args, data_batches):
         else:
             print("  [WARN: torch.compile not available in this PyTorch version]")
 
+    scaler_enabled = use_amp and method != 'amp_bf16'
     if hasattr(torch.amp, 'GradScaler'):
-        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+        scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
     else:
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
     opt_kwargs = {'lr': args.lr, 'weight_decay': 0.05}
     if getattr(args, 'cuda_graph', False):
         opt_kwargs['capturable'] = True
@@ -254,13 +266,13 @@ def benchmark_single_method(method, args, data_batches):
 
     cuda_graph_runner = None
     batch_idx = 0
+    autocast_dt = torch.bfloat16 if method == 'amp_bf16' else (torch.float16 if use_amp else None)
 
     if getattr(args, 'cuda_graph', False) and device.type == 'cuda':
         print("  [Capturing Custom APA CUDA Graph Engine (0-freeze mode)]...", end="", flush=True)
         sample_x, sample_y = data_batches[0]
         sample_x = sample_x.to(device, dtype=torch.float16 if (method == 'fp16' and not use_apa) else torch.float32, non_blocking=True)
         sample_y = sample_y.to(device, non_blocking=True)
-        autocast_dt = torch.float16 if use_amp else None
         cuda_graph_runner = APACUDAGraphRunner(
             model=model,
             optimizer=optimizer,
@@ -311,12 +323,16 @@ def benchmark_single_method(method, args, data_batches):
             optimizer.zero_grad(set_to_none=True)
             
             if use_amp:
-                with torch.amp.autocast('cuda', dtype=torch.float16):
+                with torch.amp.autocast('cuda', dtype=autocast_dt):
                     out = model(x_in)
                     loss = F.cross_entropy(out, y_in)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
             else:
                 out = model(x_in)
                 loss = F.cross_entropy(out, y_in)
@@ -357,12 +373,16 @@ def benchmark_single_method(method, args, data_batches):
             optimizer.zero_grad(set_to_none=True)
 
             if use_amp:
-                with torch.amp.autocast('cuda', dtype=torch.float16):
+                with torch.amp.autocast('cuda', dtype=autocast_dt):
                     out = model(x_in)
                     loss = F.cross_entropy(out, y_in)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
             else:
                 out = model(x_in)
                 loss = F.cross_entropy(out, y_in)

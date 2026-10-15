@@ -34,6 +34,8 @@ std::tuple<at::Tensor, at::Tensor> fused_linear_forward_cuda(
     at::ScalarType target_dtype;
     if (out_dtype_str == "float16") {
         target_dtype = at::kHalf;
+    } else if (out_dtype_str == "bfloat16" || out_dtype_str == "bf16") {
+        target_dtype = at::kBFloat16;
     } else if (out_dtype_str == "fp8" || out_dtype_str == "float8_e4m3fn") {
         target_dtype = at::kFloat8_e4m3fn;
     } else {
@@ -153,7 +155,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_linear_backward_cuda(
     }
 
     at::ScalarType act_dtype = (target_act_dtype_str == "float16") ? at::kHalf :
-                               ((target_act_dtype_str == "fp8" || target_act_dtype_str == "float8_e5m2") ? at::kFloat8_e5m2 : at::kFloat);
+                               ((target_act_dtype_str == "bfloat16" || target_act_dtype_str == "bf16") ? at::kBFloat16 :
+                               ((target_act_dtype_str == "fp8" || target_act_dtype_str == "float8_e5m2") ? at::kFloat8_e5m2 : at::kFloat));
 
     at::Tensor grad_input;
     at::Tensor grad_weight;

@@ -138,5 +138,26 @@ class TestSmoke(unittest.TestCase):
         
         os.remove(log_file)
 
+    def test_fp8_output_dtype(self):
+        # Test default float16
+        cfg_fp16 = APAConfig(fp8_simulation_mode=True, device="cpu", fp8_output_dtype="float16")
+        layer_fp16 = APALinear(8, 8, config=cfg_fp16)
+        x = torch.randn(2, 8)
+        out_fp16 = layer_fp16(x)
+        self.assertEqual(out_fp16.dtype, torch.float16)
+        out_fp16.sum().backward()
+        self.assertIsNotNone(layer_fp16.weight_master.grad)
+        self.assertEqual(layer_fp16.weight_master.grad.dtype, torch.float32)
+
+        # Test bfloat16 (FP8_bf)
+        cfg_bf16 = APAConfig(fp8_simulation_mode=True, device="cpu", fp8_output_dtype="bfloat16")
+        layer_bf16 = APALinear(8, 8, config=cfg_bf16)
+        out_bf16 = layer_bf16(x)
+        self.assertEqual(out_bf16.dtype, torch.bfloat16)
+        out_bf16.sum().backward()
+        self.assertIsNotNone(layer_bf16.weight_master.grad)
+        self.assertEqual(layer_bf16.weight_master.grad.dtype, torch.float32)
+
 if __name__ == '__main__':
     unittest.main()
+

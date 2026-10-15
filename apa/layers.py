@@ -56,6 +56,19 @@ def _get_scale_one(device):
         _SCALE_CACHE[dev_key] = torch.tensor(1.0, device=device, dtype=torch.float32)
     return _SCALE_CACHE[dev_key]
 
+def _resolve_act_dtype(cfg_or_str) -> torch.dtype:
+    if cfg_or_str is None:
+        return torch.float16
+    val = getattr(cfg_or_str, 'fp8_output_dtype', 'float16') if hasattr(cfg_or_str, 'fp8_output_dtype') else str(cfg_or_str)
+    if val in ('bfloat16', 'bf16'):
+        return torch.bfloat16
+    elif val in ('float16', 'fp16', 'half'):
+        return torch.float16
+    elif val in ('fp8', 'float8_e4m3fn'):
+        return torch.float8_e4m3fn
+    else:
+        return torch.float32
+
 _warned_scaled_mm = False
 
 def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, scale_b: torch.Tensor, bias: Optional[torch.Tensor] = None, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -135,7 +148,7 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
             out = (a.to(torch.float32) @ b.to(torch.float32)) * (scale_a * scale_b)
             if bias is not None:
                 out = out + bias
-            return out
+            return out.to(out_dtype)
     else:
         try:
             if bias is not None:
@@ -156,7 +169,7 @@ def _call_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor, sca
             out = (a.to(torch.float32) @ b.to(torch.float32)) * (scale_a * scale_b)
             if bias is not None:
                 out = out + bias
-            return out
+            return out.to(out_dtype)
 
 
 def _update_forensic_role(
@@ -298,12 +311,15 @@ class APALinearFunction(torch.autograd.Function):
                         result = F.linear(x_fp8.float() * s_a, w_calc.float() * s_b, bias.float() if bias is not None else None)
                     else:
                         result = F.linear(x_fp8.float(), w_calc.float(), bias.float() if bias is not None else None)
+                    target_act_dtype = _resolve_act_dtype(config)
+                    if result.dtype != target_act_dtype:
+                        result = result.to(target_act_dtype)
                 else:
                     original_shape = x.shape
                     x_2d = x_fp8.view(-1, x_fp8.shape[-1])
                     w_for_mm = weight_t if weight_t is not None else w_calc.t().contiguous()
 
-                    out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+                    out_dtype = _resolve_act_dtype(config)
                     bias_fwd = bias.to(out_dtype) if bias is not None else None
                     out_2d = _call_scaled_mm(
                         x_2d,
@@ -328,7 +344,7 @@ class APALinearFunction(torch.autograd.Function):
             x_16 = x.to(torch.float16) if x.dtype != torch.float16 else x
             ctx.save_for_backward(x_16, w_16, b_16)
             result = F.linear(x_16, w_16, b_16)
-            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(config)
             if result.dtype != target_act_dtype:
                 result = result.to(target_act_dtype)
         else:  # LEVEL_TF32
@@ -339,7 +355,7 @@ class APALinearFunction(torch.autograd.Function):
             x_32 = x.to(torch.float32) if x.dtype != torch.float32 else x
             ctx.save_for_backward(x_32, w_32, b_32)
             result = F.linear(x_32, w_32, b_32)
-            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(config)
             if result.dtype != target_act_dtype:
                 result = result.to(target_act_dtype)
 
@@ -442,6 +458,9 @@ class APALinearFunction(torch.autograd.Function):
 
                     if ctx.needs_input_grad[0]:
                         grad_input = (g_out_f32 @ w_f32).view(*ctx.x_shape) if hasattr(ctx, 'x_shape') else (g_out_f32 @ w_f32).view_as(x_saved)
+                        target_act_dtype = _resolve_act_dtype(config)
+                        if grad_input.dtype != target_act_dtype:
+                            grad_input = grad_input.to(target_act_dtype)
                     if ctx.needs_input_grad[1]:
                         g_out_2d = g_out_f32.reshape(-1, g_out_f32.shape[-1])
                         x_2d = x_f32.reshape(-1, x_f32.shape[-1])
@@ -452,7 +471,7 @@ class APALinearFunction(torch.autograd.Function):
                 else:
                     g_out_2d = g_fp8.reshape(-1, g_fp8.shape[-1])
 
-                    out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+                    out_dtype = _resolve_act_dtype(config)
                     if ctx.needs_input_grad[0]:
                         # Zero-copy fast-path: g_out_2d is row-major, w_saved is pre-transposed column-major
                         grad_input_2d = _call_scaled_mm(
@@ -490,7 +509,7 @@ class APALinearFunction(torch.autograd.Function):
                 grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).sum(dim=0, dtype=torch.float32)
 
         if grad_input is not None:
-            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(config)
             grad_input = grad_input.to(target_act_dtype)
         if grad_weight is not None:
             grad_weight = grad_weight.to(torch.float32)
@@ -724,7 +743,7 @@ class APALinear(APAModule):
             b = self.bias_master
             x_in = x.to(w.dtype) if x.dtype != w.dtype else x
             out = F.linear(x_in, w, b)
-            target_act_dtype = torch.float16 if getattr(self.config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(self.config)
             return out.to(target_act_dtype) if out.dtype != target_act_dtype else out
 
         if self.weight_work is None:
@@ -852,7 +871,7 @@ class APAConv2dFunction(torch.autograd.Function):
                 s_a = _get_scale_one(x.device)
                 s_b = _get_scale_one(weight.device)
 
-            out_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            out_dtype = _resolve_act_dtype(config)
             x_scaled = (x_fp8.to(out_dtype) * s_a.to(out_dtype)) if config.enable_dynamic_scaling else x_fp8.to(out_dtype)
             w_scaled = (w_calc.to(out_dtype) * s_b.to(out_dtype)) if config.enable_dynamic_scaling else w_calc.to(out_dtype)
             b_scaled = bias.to(out_dtype) if bias is not None else None
@@ -874,7 +893,7 @@ class APAConv2dFunction(torch.autograd.Function):
             x_32 = x.to(torch.float32) if x.dtype != torch.float32 else x
             ctx.save_for_backward(x_32, w_32, b_32, dummy, dummy, dummy, dummy, gpu_amax, gpu_has_nonfinite, gpu_amax_grad)
             result = F.conv2d(x_32, w_32, b_32, stride, padding, dilation, groups)
-            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(config)
             if result.dtype != target_act_dtype:
                 result = result.to(target_act_dtype)
 
@@ -938,7 +957,7 @@ class APAConv2dFunction(torch.autograd.Function):
                 s_x = _get_scale_one(x_saved.device)
                 s_w = _get_scale_one(w_saved.device)
 
-            calc_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            calc_dtype = _resolve_act_dtype(config)
             g_scaled = (g_fp8.to(calc_dtype) * s_g.to(calc_dtype)) if config.enable_dynamic_scaling else g_fp8.to(calc_dtype)
             x_scaled = (x_saved.to(calc_dtype) * s_x.to(calc_dtype)) if config.enable_dynamic_scaling else x_saved.to(calc_dtype)
             w_scaled = (w_saved.to(calc_dtype) * s_w.to(calc_dtype)) if config.enable_dynamic_scaling else w_saved.to(calc_dtype)
@@ -961,7 +980,7 @@ class APAConv2dFunction(torch.autograd.Function):
                 grad_bias = grad_output.sum(dim=(0, 2, 3), dtype=torch.float32)
 
         if grad_input is not None:
-            target_act_dtype = torch.float16 if getattr(config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(config)
             grad_input = grad_input.to(target_act_dtype)
         if grad_weight is not None:
             grad_weight = grad_weight.to(torch.float32)
@@ -1098,7 +1117,7 @@ class APAConv2d(APAModule):
             b = self.bias_master
             x_in = x.to(w.dtype) if x.dtype != w.dtype else x
             out = F.conv2d(x_in, w, b, self.stride, self.padding, self.dilation, self.groups)
-            target_act_dtype = torch.float16 if getattr(self.config, 'fp8_output_dtype', 'float32') == 'float16' else torch.float32
+            target_act_dtype = _resolve_act_dtype(self.config)
             return out.to(target_act_dtype) if out.dtype != target_act_dtype else out
 
         if self.weight_work is None:

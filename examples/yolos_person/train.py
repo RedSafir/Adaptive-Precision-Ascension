@@ -30,8 +30,8 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate for AdamW")
     parser.add_argument('--weight_decay', type=float, default=1e-4, help="Weight decay")
     parser.add_argument('--precision', type=str, default='apa_fp8',
-                        choices=['fp32', 'apa_fp8', 'apa', 'fp16', 'tf32'],
-                        help="Precision engine: 'fp32' (Pure FP32 baseline, no TF32), 'apa_fp8' (APA FP8 Custom Fused Engine), 'apa' (Adaptive FP8->FP16->TF32)")
+                        choices=['fp32', 'apa_fp8', 'apa', 'fp16', 'amp', 'amp_fp16', 'tf32'],
+                        help="Precision engine: 'fp32' (Pure FP32), 'apa_fp8' (APA FP8 Custom Fused), 'apa' (Adaptive FP8->FP16->TF32), 'fp16' (APA Fixed FP16 Custom), 'amp' / 'amp_fp16' (PyTorch Native AMP FP16 autocast + GradScaler)")
     parser.add_argument('--apa_preset', type=str, default='research', choices=['research', 'conservative', 'aggressive'])
     parser.add_argument('--check_interval', type=int, default=1, help="Evaluation interval for soft checks in APA")
     parser.add_argument('--workers', type=int, default=4, help="Number of DataLoader worker processes")
@@ -64,7 +64,9 @@ def main():
 
     # 1. Precision & Hardware Setup
     use_apa = False
+    use_amp = False
     freeze_level = None
+    scaler = None
 
     if args.precision == 'fp32':
         # Pure IEEE-754 FP32 baseline (disable TF32 Tensor Cores)
@@ -99,6 +101,16 @@ def main():
         use_apa = True
         freeze_level = LEVEL_FP16
         mode_desc = "APA Fixed FP16 (Custom APALinear, NO AMP)"
+    elif args.precision in ('amp', 'amp_fp16'):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        use_apa = False
+        use_amp = True
+        if hasattr(torch.amp, 'GradScaler'):
+            scaler = torch.amp.GradScaler('cuda', enabled=True)
+        else:
+            scaler = torch.cuda.amp.GradScaler(enabled=True)
+        mode_desc = "PyTorch Standard AMP FP16 (torch.amp.autocast + GradScaler, Native nn.Linear)"
     else:
         raise ValueError(f"Unknown precision: {args.precision}")
 
@@ -216,22 +228,29 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
 
-            # Pure forward pass - No torch.amp.autocast!
-            outputs = model(pixel_values=pixel_values, labels=labels)
-            loss = outputs.loss
-            loss_dict = outputs.loss_dict
-
-            # Backward pass
-            loss.backward()
-
-            # Post-backward evaluation & sync
-            if apa_manager is not None:
+            if use_amp:
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    outputs = model(pixel_values=pixel_values, labels=labels)
+                    loss = outputs.loss
+                    loss_dict = outputs.loss_dict
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            elif apa_manager is not None:
+                outputs = model(pixel_values=pixel_values, labels=labels)
+                loss = outputs.loss
+                loss_dict = outputs.loss_dict
+                loss.backward()
                 step_ok = apa_manager.post_backward_sync_and_eval()
                 if step_ok:
                     optimizer.step()
                 else:
                     optimizer.zero_grad(set_to_none=True)
             else:
+                outputs = model(pixel_values=pixel_values, labels=labels)
+                loss = outputs.loss
+                loss_dict = outputs.loss_dict
+                loss.backward()
                 optimizer.step()
 
             torch.cuda.synchronize()
