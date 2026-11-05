@@ -3,7 +3,7 @@ set -e
 
 echo "================================================================="
 echo "  VAST.AI ONSTART: SINGLE TEST RUN (YOLOS APA GAMMA 0.9 & THETA 0.9)"
-echo "  Validation Test Separated from Cluster 1 Suite                 "
+echo "  Dataset: Hugging Face (miftahN/soccers-player-ball)            "
 echo "================================================================="
 
 # 1. Setup GitHub Credentials & Pull Repository
@@ -20,21 +20,17 @@ fi
 cd "$REPO_DIR"
 git pull origin main
 
-# 2. Setup Kaggle Credentials & Download Dataset
-if [ -n "$KAGGLE_API_TOKEN" ]; then
-    export KAGGLE_API_TOKEN="$KAGGLE_API_TOKEN"
-    mkdir -p ~/.kaggle
-    echo "$KAGGLE_API_TOKEN" > ~/.kaggle/access_token
-    chmod 600 ~/.kaggle/access_token
-fi
-
+# 2. Download Clean Dataset from Hugging Face CDN (Fast ~2 mins, 26 GB)
 DATASET_DIR="$REPO_DIR/datasets/detection-person-and-ball/merged_yolo_person_ball"
 if [ ! -d "$DATASET_DIR" ]; then
-    echo "[*] Downloading dataset from Kaggle (rifqilukmansyah381/detection-person-and-ball)..."
+    echo "[*] Downloading 26 GB clean dataset from Hugging Face (miftahN/soccers-player-ball)..."
     mkdir -p "$REPO_DIR/datasets/detection-person-and-ball"
-    pip install kaggle -q
-    kaggle datasets download -d rifqilukmansyah381/detection-person-and-ball -p "$REPO_DIR/datasets/detection-person-and-ball" --unzip
-    echo "[✓] Dataset downloaded and unzipped successfully!"
+    TAR_PATH="$REPO_DIR/datasets/detection-person-and-ball/merged_yolo_person_ball.tar"
+    curl -L "https://huggingface.co/datasets/miftahN/soccers-player-ball/resolve/main/merged_yolo_person_ball.tar" -o "$TAR_PATH"
+    echo "[*] Extracting dataset archive..."
+    tar -xf "$TAR_PATH" -C "$REPO_DIR/datasets/detection-person-and-ball"
+    rm -f "$TAR_PATH"
+    echo "[✓] Dataset extracted successfully and ready at $DATASET_DIR!"
 else
     echo "[*] Dataset already present at $DATASET_DIR."
 fi
