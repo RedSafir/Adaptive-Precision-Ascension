@@ -221,7 +221,7 @@ def auto_push_results_to_github(github_pat: str, base_dir: str):
     try:
         subprocess.run(["git", "config", "user.name", "RedSafir"], cwd=base_dir, check=True)
         subprocess.run(["git", "config", "user.email", "mfthnugraha@gmail.com"], cwd=base_dir, check=True)
-        subprocess.run(["git", "add", "result/", "runs/"], cwd=base_dir, check=True)
+        subprocess.run(["git", "add", "-f", "result/", "runs/"], cwd=base_dir, check=True)
 
         status = subprocess.run(["git", "status", "--porcelain"], cwd=base_dir, capture_output=True, text=True)
         if status.stdout.strip():
@@ -246,7 +246,7 @@ def shutdown_vastai_instance(action: str):
         return
 
     container_id = os.environ.get('VAST_CONTAINERLABEL', os.environ.get('CONTAINER_ID', None))
-    api_key = os.environ.get('CONTAINER_API_KEY', None)
+    api_key = os.environ.get('CONTAINER_API_KEY', os.environ.get('VAST_API_KEY', None))
 
     print("\n" + "=" * 80)
     print(f"  [AUTO-SHUTDOWN] Triggering Vast.ai instance {action.upper()}...")
@@ -273,7 +273,7 @@ def shutdown_vastai_instance(action: str):
         try:
             import urllib.request
             method = "DELETE" if action == "destroy" else "PUT"
-            url = f"https://console.vast.ai/api/v0/instances/{container_id}/"
+            url = f"https://console.vast.ai/api/v1/instances/{container_id}/"
             data = None if action == "destroy" else json.dumps({"state": "stopped"}).encode('utf-8')
             req = urllib.request.Request(url, data=data, method=method)
             req.add_header("Authorization", f"Bearer {api_key}")

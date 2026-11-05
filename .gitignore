@@ -27,17 +27,21 @@ env/
 ENV/
 .env
 
-# PyTorch / Training
+# PyTorch / Training Checkpoints (large binary weights)
 *.pt
 *.pth
 *.bin
-*.jsonl
-result/*.jsonl
-result/*.json
-examples/vit_cifar10/data/
-examples/nanogpt_char/input.txt
+
+# Datasets
 datasets/
-runs/
+
+# Runs & Telemetry Logs
+runs/*
+!runs/*/
+!runs/**/*.jsonl
+!runs/**/*.json
+!result/*.md
+!result/*.jsonl
 
 # Jupyter Notebooks
 *.ipynb
