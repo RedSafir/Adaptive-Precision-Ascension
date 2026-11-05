@@ -26,7 +26,12 @@ if [ ! -d "$DATASET_DIR" ]; then
     echo "[*] Downloading 26 GB clean dataset from Hugging Face (miftahN/soccers-player-ball)..."
     mkdir -p "$REPO_DIR/datasets/detection-person-and-ball"
     TAR_PATH="$REPO_DIR/datasets/detection-person-and-ball/merged_yolo_person_ball.tar"
-    curl -fL --retry 3 --retry-delay 2 "https://huggingface.co/datasets/miftahN/soccers-player-ball/resolve/main/merged_yolo_person_ball.tar" -o "$TAR_PATH"
+    AUTH_HEADER=()
+    if [ -n "$HF_TOKEN" ]; then
+        echo "[*] Using authenticated Hugging Face token for priority rate limits & maximum CDN speed."
+        AUTH_HEADER=(-H "Authorization: Bearer $HF_TOKEN")
+    fi
+    curl -fL "${AUTH_HEADER[@]}" --retry 3 --retry-delay 2 "https://huggingface.co/datasets/miftahN/soccers-player-ball/resolve/main/merged_yolo_person_ball.tar" -o "$TAR_PATH"
     echo "[*] Extracting dataset archive..."
     tar -xf "$TAR_PATH" -C "$REPO_DIR/datasets/detection-person-and-ball"
     rm -f "$TAR_PATH"
