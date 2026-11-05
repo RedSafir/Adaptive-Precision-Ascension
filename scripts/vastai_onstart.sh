@@ -60,12 +60,13 @@ fi
 
 # 3. Setup Python dependencies & native APA CUDA kernels
 echo "[*] Installing dependencies & building APA kernels..."
-pip install opencv-python-headless scipy transformers accelerate tqdm pillow datasets huggingface_hub vastai -q
-pip install -e ".[examples]"
+which python || ln -sf /usr/bin/python3 /usr/bin/python
+python3 -m pip install opencv-python-headless scipy transformers accelerate tqdm pillow datasets huggingface_hub vastai -q
+python3 -m pip install -e ".[examples]"
 
 # 4. Launch Klaster 1 50-Epoch Orchestration Suite (3 Runs)
 echo "[*] Launching Klaster 1 Suite (50 Epochs, Hybrid CUDA Graph, Gamma 0.1/0.5/0.9, Theta 0.9)..."
-python scripts/run_vastai_cluster1.py \
+python3 scripts/run_vastai_cluster1.py \
     --gamma_list 0.1 0.5 0.9 \
     --theta_underflow 0.9 \
     --epochs 50 \
