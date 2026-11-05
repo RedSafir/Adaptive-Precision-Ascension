@@ -37,6 +37,9 @@ def get_args():
     parser.add_argument('--theta_underflow', type=float, default=None, help="Override APA theta silent underflow ratio threshold (e.g. 0.1, 0.5, 0.9)")
     parser.add_argument('--check_interval', type=int, default=1, help="Evaluation interval for soft checks in APA")
     parser.add_argument('--cuda_graph', action='store_true', help="Enable Hybrid CUDA Graph acceleration on YOLOS ViT Backbone")
+    parser.add_argument('--enable_frobenius_telemetry', action='store_true', help="Enable Frobenius norm diagnostic telemetry")
+    parser.add_argument('--frobenius_check_interval', type=int, default=8, help="Step interval for Frobenius norm logging")
+    parser.add_argument('--frobenius_log_file', type=str, default=None, help="Path to save Frobenius JSONL log")
     parser.add_argument('--workers', type=int, default=4, help="Number of DataLoader worker processes")
     parser.add_argument('--max_steps', type=int, default=0, help="Max steps per epoch (0 = full epoch)")
     parser.add_argument('--log_file', type=str, default=None, help="Path to save JSONL training log")
@@ -158,6 +161,13 @@ def main():
             apa_cfg.fp8_output_dtype = 'float16'
         if args.log_file:
             apa_cfg.log_file = args.log_file.replace('.jsonl', '_apa_events.jsonl')
+        if args.enable_frobenius_telemetry:
+            apa_cfg.enable_frobenius_telemetry = True
+            apa_cfg.frobenius_check_interval = args.frobenius_check_interval
+            if args.frobenius_log_file:
+                apa_cfg.frobenius_log_file = args.frobenius_log_file
+            elif args.log_file:
+                apa_cfg.frobenius_log_file = args.log_file.replace('.jsonl', '_frobenius.jsonl')
 
         model = convert_yolos_to_apa(model, config=apa_cfg, preserve_critical_heads=True)
         apa_manager = APAManager(model, config=apa_cfg)
