@@ -138,6 +138,8 @@ def create_yolos_hybrid_cuda_graph(
 
     if hasattr(torch.autograd.graph, 'set_override_stale_capture_stream'):
         torch.autograd.graph.set_override_stale_capture_stream(True)
+    if hasattr(torch.autograd.graph, 'set_warn_on_accumulate_grad_stream_mismatch'):
+        torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
     print(f"[CUDA Graph] Initializing YOLOS Hybrid CUDA Graph capture (warmup={warmup_iters})...")
     backbone = _YolosViTBackbone(model.vit).to(sample_input.device)

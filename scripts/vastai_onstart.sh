@@ -1,6 +1,23 @@
 #!/bin/bash
 set -e
 
+shutdown_on_error() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ] && [ "${ON_FINISH:-stop}" = "stop" ]; then
+        echo "[!] Error occurred during onstart setup (exit code $exit_code). Stopping Vast.ai instance to prevent idle billing..."
+        RAW_ID="${VAST_CONTAINERLABEL:-$CONTAINER_ID}"
+        CLEAN_ID="${RAW_ID#C.}"
+        API_KEY="${CONTAINER_API_KEY:-$VAST_API_KEY}"
+        if [ -n "$CLEAN_ID" ] && [ -n "$API_KEY" ]; then
+            curl -s -X PUT "https://console.vast.ai/api/v1/instances/${CLEAN_ID}/" \
+                -H "Authorization: Bearer ${API_KEY}" \
+                -H "Content-Type: application/json" \
+                -d '{"state": "stopped"}' || true
+        fi
+    fi
+}
+trap shutdown_on_error EXIT
+
 echo "================================================================="
 echo "  VAST.AI ONSTART: KLASTER 1 (YOLOS APA 3 RUNS: GAMMA 0.1/0.5/0.9)"
 echo "  Fixed Underflow Threshold: theta_underflow = 0.9               "
@@ -43,8 +60,8 @@ fi
 
 # 3. Setup Python dependencies & native APA CUDA kernels
 echo "[*] Installing dependencies & building APA kernels..."
+pip install opencv-python-headless scipy transformers accelerate tqdm pillow datasets huggingface_hub vastai -q
 pip install -e ".[examples]"
-pip install vastai -q
 
 # 4. Launch Klaster 1 50-Epoch Orchestration Suite (3 Runs)
 echo "[*] Launching Klaster 1 Suite (50 Epochs, Hybrid CUDA Graph, Gamma 0.1/0.5/0.9, Theta 0.9)..."

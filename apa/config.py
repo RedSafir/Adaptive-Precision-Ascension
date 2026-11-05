@@ -82,6 +82,14 @@ class APAConfig:
     freeze_level: Optional[int] = None  # If set (0=FP8, 1=FP16, 2=TF32), fixes precision and disables escalation
     fp8_output_dtype: str = 'float16'   # 'float16' (default: fast FP16 output accumulator), 'bfloat16' / 'bf16' (BF16 output accumulator), or 'float32'
 
+    def get_threshold_max(self, level: int) -> float:
+        """Return dynamic overflow threshold for the given precision level using self.gamma."""
+        if level == LEVEL_FP8:
+            return float(self.gamma) * FP8_E4M3_MAX
+        elif level == LEVEL_FP16:
+            return float(self.gamma) * FP16_MAX
+        return float('inf')
+
     # ---------------------------------------------------------------------------
     # Forensic Logging (opt-in, disabled by default)
     # ---------------------------------------------------------------------------
@@ -149,10 +157,18 @@ class APAConfig:
         return cls(**config_kwargs)
 
     @classmethod
+    def conservative_default(cls, **kwargs):
+        return cls.conservative(**kwargs)
+
+    @classmethod
     def aggressive(cls, **kwargs):
         config_kwargs = dict(gamma=0.95, theta_underflow=0.50, check_interval=8)
         config_kwargs.update(kwargs)
         return cls(**config_kwargs)
+
+    @classmethod
+    def aggressive_default(cls, **kwargs):
+        return cls.aggressive(**kwargs)
 
     @classmethod
     def research_default(cls, **kwargs):

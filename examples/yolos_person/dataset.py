@@ -130,6 +130,16 @@ def build_dataloader(
         class_filter=class_filter,
         max_samples=max_samples
     )
+    # Check /dev/shm capacity on Linux Docker containers (e.g. Vast.ai default 64MB /dev/shm)
+    if num_workers > 0 and os.path.exists('/dev/shm'):
+        try:
+            st = os.statvfs('/dev/shm')
+            shm_free_mb = (st.f_bavail * st.f_frsize) / (1024 * 1024)
+            if shm_free_mb < 512:
+                print(f"[DataLoader] Notice: /dev/shm has only {shm_free_mb:.0f} MB free (<512 MB). Setting num_workers=0 to prevent Bus error.")
+                num_workers = 0
+        except Exception:
+            pass
     return DataLoader(
         dataset,
         batch_size=batch_size,

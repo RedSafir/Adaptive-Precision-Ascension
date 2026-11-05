@@ -187,6 +187,7 @@ def main():
             _warm_loss = _warm_out.last_hidden_state.sum()
             _warm_loss.backward()
             apa_manager.post_backward_sync_and_eval()
+            apa_manager.step_count = 0
             optimizer.zero_grad(set_to_none=True)
             del _warm_out, _warm_loss
         model = create_yolos_hybrid_cuda_graph(model, sample_img, warmup_iters=3)

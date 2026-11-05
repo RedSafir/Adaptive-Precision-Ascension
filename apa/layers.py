@@ -598,7 +598,7 @@ class APAModule(nn.Module):
 
     @property
     def current_threshold_max(self):
-        return THRESHOLDS_MAX[self.level]
+        return self.config.get_threshold_max(self.level)
 
     def update_delayed_scales(self, update_weight: bool = False):
         """Update delayed scales asynchronously using tracked running amax (NVIDIA style, 100% on GPU)."""

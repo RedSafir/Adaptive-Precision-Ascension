@@ -76,7 +76,9 @@ def count_escalation_events(events_path: str) -> Dict[str, int]:
                     continue
                 try:
                     ev = json.loads(line)
-                    trigger = ev.get('trigger_reason', '')
+                    if ev.get('event') not in (None, 'escalation'):
+                        continue
+                    trigger = ev.get('reason', ev.get('trigger_reason', ''))
                     if 'OVERFLOW' in trigger:
                         counts['OVERFLOW'] += 1
                     elif 'UNDERFLOW' in trigger:
@@ -216,8 +218,18 @@ def auto_push_results_to_github(github_pat: str, base_dir: str):
         env = os.environ.copy()
         env['GIT_TERMINAL_PROMPT'] = '0'
         env['GIT_ASKPASS'] = ''
-        subprocess.run(["git", "push", remote_url, "main"], cwd=base_dir, check=True, env=env)
-        print("[✓] Single test results successfully pushed to GitHub origin/main!")
+
+        # Pull rebase first in case main moved during training
+        subprocess.run(["git", "pull", "--rebase", "-X", "theirs", remote_url, "main"], cwd=base_dir, check=False, env=env)
+        push_res = subprocess.run(["git", "push", remote_url, "main"], cwd=base_dir, check=False, env=env)
+        if push_res.returncode != 0:
+            fallback_branch = f"vastai-single-test-{int(time.time())}"
+            print(f"[!] Push to main failed, pushing to fallback branch {fallback_branch}...")
+            subprocess.run(["git", "rebase", "--abort"], cwd=base_dir, check=False, env=env)
+            subprocess.run(["git", "push", remote_url, f"HEAD:refs/heads/{fallback_branch}"], cwd=base_dir, check=True, env=env)
+            print(f"[✓] Single test results pushed to fallback branch {fallback_branch}!")
+        else:
+            print("[✓] Single test results successfully pushed to GitHub origin/main!")
         return True
     except Exception as e:
         print(f"[!] Git push failed: {e}")
@@ -228,13 +240,14 @@ def shutdown_vastai_instance(action: str):
         print(f"[*] on_finish is set to '{action}'. Instance will remain active.")
         return
 
-    container_id = os.environ.get('VAST_CONTAINERLABEL', os.environ.get('CONTAINER_ID', None))
+    raw_container_id = os.environ.get('VAST_CONTAINERLABEL', os.environ.get('CONTAINER_ID', None))
+    container_id = str(raw_container_id).replace('C.', '').strip() if raw_container_id else None
     api_key = os.environ.get('CONTAINER_API_KEY', os.environ.get('VAST_API_KEY', None))
 
     print("\n" + "=" * 80)
     print(f"  [AUTO-SHUTDOWN] Triggering Vast.ai instance {action.upper()}...")
-    print(f"  Container Label: {container_id} | API Key present: {bool(api_key)}")
-    print("=" * 80)
+    print(f"  Container ID: {container_id} (raw: {raw_container_id}) | API Key present: {bool(api_key)}")
+    print("=" * 80, flush=True)
 
     # 1. Try vastai CLI
     if container_id:
@@ -244,14 +257,14 @@ def shutdown_vastai_instance(action: str):
         try:
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode == 0:
-                print(f"[✓] Vast.ai instance {container_id} {action} succeeded via CLI: {res.stdout.strip()}")
+                print(f"[✓] Vast.ai instance {container_id} {action} succeeded via CLI: {res.stdout.strip()}", flush=True)
                 return
             else:
-                print(f"[!] Vast CLI returned code {res.returncode}: {res.stderr.strip()}")
+                print(f"[!] Vast CLI returned code {res.returncode}: {res.stderr.strip()}", flush=True)
         except FileNotFoundError:
-            print("[*] vastai CLI not installed, trying curl API fallback...")
+            print("[*] vastai CLI not installed, trying curl API fallback...", flush=True)
 
-    # 2. Try Vast.ai REST API via curl fallback
+    # 2. Try Vast.ai REST API via urllib fallback
     if container_id and api_key:
         try:
             import urllib.request
@@ -262,13 +275,13 @@ def shutdown_vastai_instance(action: str):
             req.add_header("Authorization", f"Bearer {api_key}")
             req.add_header("Content-Type", "application/json")
             with urllib.request.urlopen(req, timeout=15) as resp:
-                print(f"[✓] Vast.ai API {action} call responded with HTTP {resp.status}")
+                print(f"[✓] Vast.ai API {action} call responded with HTTP {resp.status}", flush=True)
                 return
         except Exception as e:
-            print(f"[!] Vast REST API fallback failed: {e}")
+            print(f"[!] Vast REST API fallback failed: {e}", flush=True)
 
     # 3. Last resort local OS shutdown
-    print("[*] Executing system poweroff as fallback to stop billing...")
+    print("[*] Executing system poweroff as fallback to stop billing...", flush=True)
     os.system("poweroff || shutdown -h now")
 
 def main():
@@ -280,44 +293,48 @@ def main():
     print("  VAST.AI SINGLE TEST RUNNER: YOLOS APA (GAMMA=0.9, THETA_UNDERFLOW=0.9)")
     print(f"  Target Epochs: {args.epochs} | Batch Size: {args.batch_size} | CUDA Graph: {args.cuda_graph}")
     print(f"  On Finish: {args.on_finish.upper()}")
-    print("=" * 90)
+    print("=" * 90, flush=True)
 
-    log_file, events_file = run_single_test_experiment(args.gamma, args.theta_underflow, args, base_dir)
-    header, epochs, steps = parse_jsonl(log_file)
-    ev_counts = count_escalation_events(events_file)
+    try:
+        log_file, events_file = run_single_test_experiment(args.gamma, args.theta_underflow, args, base_dir)
+        header, epochs, steps = parse_jsonl(log_file)
+        ev_counts = count_escalation_events(events_file)
 
-    last_epoch = epochs[-1] if epochs else {}
-    total_time_min = sum(e.get('duration_sec', 0) for e in epochs) / 60.0
-    avg_fps = sum(e.get('avg_fps', 0) for e in epochs) / max(len(epochs), 1)
-    avg_lat = sum(e.get('avg_latency_ms', 0) for e in epochs) / max(len(epochs), 1)
-    peak_vram = max([e.get('peak_vram_mb', 0) for e in epochs] + [0])
+        last_epoch = epochs[-1] if epochs else {}
+        total_time_min = sum(e.get('duration_sec', 0) for e in epochs) / 60.0
+        avg_fps = sum(e.get('avg_fps', 0) for e in epochs) / max(len(epochs), 1)
+        avg_lat = sum(e.get('avg_latency_ms', 0) for e in epochs) / max(len(epochs), 1)
+        peak_vram = max([e.get('peak_vram_mb', 0) for e in epochs] + [0])
 
-    res = {
-        'gamma': args.gamma,
-        'theta_underflow': args.theta_underflow,
-        'epochs': len(epochs),
-        'total_time_min': total_time_min,
-        'avg_fps': avg_fps,
-        'avg_latency_ms': avg_lat,
-        'peak_vram_mb': peak_vram,
-        'final_total_loss': last_epoch.get('avg_loss', 0.0),
-        'final_bbox_l1': last_epoch.get('avg_bbox', 0.0),
-        'final_giou': last_epoch.get('avg_giou', 0.0),
-        'final_ce': last_epoch.get('avg_ce', 0.0),
-        'escalation_total': ev_counts['TOTAL'],
-        'underflow_events': ev_counts['SILENT_UNDERFLOW'],
-        'overflow_events': ev_counts['OVERFLOW']
-    }
+        res = {
+            'gamma': args.gamma,
+            'theta_underflow': args.theta_underflow,
+            'epochs': len(epochs),
+            'total_time_min': total_time_min,
+            'avg_fps': avg_fps,
+            'avg_latency_ms': avg_lat,
+            'peak_vram_mb': peak_vram,
+            'final_total_loss': last_epoch.get('avg_loss', 0.0),
+            'final_bbox_l1': last_epoch.get('avg_bbox', 0.0),
+            'final_giou': last_epoch.get('avg_giou', 0.0),
+            'final_ce': last_epoch.get('avg_ce', 0.0),
+            'escalation_total': ev_counts['TOTAL'],
+            'underflow_events': ev_counts['SILENT_UNDERFLOW'],
+            'overflow_events': ev_counts['OVERFLOW']
+        }
 
-    # Generate Markdown Report
-    report_file = os.path.join(base_dir, 'result', 'single_test_gamma09_theta09_report.md')
-    generate_single_test_report(res, report_file)
-
-    # Push to GitHub
-    push_ok = auto_push_results_to_github(args.github_pat, base_dir)
-
-    # Auto Shutdown Vast.ai Instance
-    shutdown_vastai_instance(args.on_finish)
+        # Generate Markdown Report
+        report_file = os.path.join(base_dir, 'result', 'single_test_gamma09_theta09_report.md')
+        generate_single_test_report(res, report_file)
+    except Exception as e:
+        print(f"[ERROR] Exception during single test execution: {e}", flush=True)
+    finally:
+        # Push whatever logs/reports exist to GitHub and ALWAYS trigger shutdown
+        try:
+            auto_push_results_to_github(args.github_pat, base_dir)
+        except Exception as push_err:
+            print(f"[!] Exception during auto_push: {push_err}", flush=True)
+        shutdown_vastai_instance(args.on_finish)
 
 if __name__ == '__main__':
     main()

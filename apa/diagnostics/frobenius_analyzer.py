@@ -348,6 +348,7 @@ class FrobeniusTelemetry:
                     "weight_norm": round(lm["weight_norm"], 6),
                     "grad_norm": round(lm["grad_norm"], 6),
                     "update_ratio": round(lm["update_ratio"], 8),
+                    "amax": round(lm["amax"], 6) if lm.get("amax") is not None else None,
                     "level": lm.get("level")
                 }
                 for lm in eval_result.get("layer_metrics", [])

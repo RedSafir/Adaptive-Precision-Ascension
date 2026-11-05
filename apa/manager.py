@@ -274,11 +274,12 @@ class APAManager:
                     amax_val = all_amax[i]
                     underflow_val = all_underflow[i]
                     has_nonfinite = all_nonfinite[i] > 0
+                    thresh_max = self.config.get_threshold_max(module.level)
 
-                    if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX[module.level]:
+                    if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > thresh_max:
                         batch_has_overflow = True
                         trigger_modules.append(name)
-                        trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) and amax_val <= THRESHOLDS_MAX[module.level] else amax_val
+                        trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) and amax_val <= thresh_max else amax_val
                         self._escalate_module(name, module, 'OVERFLOW', trigger_val)
                     else:
                         module.ema_underflow_ratio = (self.config.ema_alpha * module.ema_underflow_ratio +
@@ -294,7 +295,7 @@ class APAManager:
                             "underflow_ratio": float(all_underflow[i]),
                             "ema_underflow": float(module.ema_underflow_ratio),
                             "level": module.level,
-                            "threshold_max": THRESHOLDS_MAX.get(module.level, float('inf'))
+                            "threshold_max": self.config.get_threshold_max(module.level)
                         }
                     self.logger.log_periodic_telemetry(self.step_count, periodic_data)
 
@@ -317,7 +318,7 @@ class APAManager:
                 for i, (name, module) in enumerate(other_items):
                     amax_val = other_amax[i]
                     has_nonfinite = other_nonfinite[i] > 0
-                    if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > THRESHOLDS_MAX.get(min_apa_level, float('inf')):
+                    if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > self.config.get_threshold_max(min_apa_level):
                         batch_has_overflow = True
                         trigger_modules.append(name)
                         trigger_val = float('nan') if has_nonfinite and not math.isinf(amax_val) and not math.isnan(amax_val) else amax_val
@@ -473,7 +474,7 @@ class APAManager:
             'culprit_tensor_role': culprit_role,
             'per_role_amax': per_role_amax,
             'amax_value': float(trigger_value),
-            'threshold_at_time': THRESHOLDS_MAX.get(old_level, float('inf')),
+            'threshold_at_time': self.config.get_threshold_max(old_level),
             'tensor_shape': tensor_shape,
             'dtype_at_time': dtype_at_time,
             'preceding_module_in_forward_order': preceding_module,
@@ -500,11 +501,25 @@ class APAManager:
                 self.frobenius_telemetry.log_step(self.step_count, eval_res)
 
         if self.config.freeze_level is not None:
+            with torch.no_grad():
+                for module in self.apa_modules.values():
+                    module.gpu_amax.zero_()
+                    if hasattr(module, 'gpu_amax_x'):
+                        module.gpu_amax_x.zero_()
+                    if hasattr(module, 'gpu_amax_grad'):
+                        module.gpu_amax_grad.zero_()
             return True
 
         has_hard_overflow = self._check_hard_overflow()
         periodic_due = (self.config.telemetry_log_interval > 0 and (self.step_count % self.config.telemetry_log_interval == 0))
         if has_hard_overflow or (self.step_count % self.config.check_interval == 0) or periodic_due:
             return self._do_full_evaluation()
+
+        with torch.no_grad():
+            for module in self.apa_modules.values():
+                if hasattr(module, 'gpu_amax_x'):
+                    module.gpu_amax_x.zero_()
+                if hasattr(module, 'gpu_amax_grad'):
+                    module.gpu_amax_grad.zero_()
 
         return True

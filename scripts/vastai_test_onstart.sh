@@ -1,6 +1,23 @@
 #!/bin/bash
 set -e
 
+shutdown_on_error() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ] && [ "${ON_FINISH:-stop}" = "stop" ]; then
+        echo "[!] Error occurred during onstart setup (exit code $exit_code). Stopping Vast.ai instance to prevent idle billing..."
+        RAW_ID="${VAST_CONTAINERLABEL:-$CONTAINER_ID}"
+        CLEAN_ID="${RAW_ID#C.}"
+        API_KEY="${CONTAINER_API_KEY:-$VAST_API_KEY}"
+        if [ -n "$CLEAN_ID" ] && [ -n "$API_KEY" ]; then
+            curl -s -X PUT "https://console.vast.ai/api/v1/instances/${CLEAN_ID}/" \
+                -H "Authorization: Bearer ${API_KEY}" \
+                -H "Content-Type: application/json" \
+                -d '{"state": "stopped"}' || true
+        fi
+    fi
+}
+trap shutdown_on_error EXIT
+
 echo "================================================================="
 echo "  VAST.AI ONSTART: SINGLE TEST RUN (YOLOS APA GAMMA 0.9 & THETA 0.9)"
 echo "  Dataset: Hugging Face (miftahN/soccers-player-ball)            "
@@ -42,8 +59,8 @@ fi
 
 # 3. Setup Python dependencies & native APA CUDA kernels
 echo "[*] Installing dependencies & building APA kernels..."
+pip install opencv-python-headless scipy transformers accelerate tqdm pillow datasets huggingface_hub vastai -q
 pip install -e ".[examples]"
-pip install vastai -q
 
 # 4. Launch Single Test Runner (Default 50 epochs, or overridden by TEST_EPOCHS)
 EPOCHS_TO_RUN="${TEST_EPOCHS:-50}"
