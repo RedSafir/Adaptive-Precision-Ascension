@@ -52,3 +52,7 @@ runs/
 .DS_Store
 Thumbs.db
 !result/*.md
+
+# Studi Kasus Bab 2 Skripsi Itenas
+studi_kasus_bab2/
+

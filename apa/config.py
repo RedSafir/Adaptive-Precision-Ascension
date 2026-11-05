@@ -112,6 +112,13 @@ class APAConfig:
     def __post_init__(self):
         if DTYPE_MAP[0] is None:
             self.fp8_simulation_mode = True
+        elif torch.cuda.is_available():
+            try:
+                dev = self.device if (isinstance(self.device, str) and 'cuda' in self.device) else 0
+                if torch.cuda.get_device_capability(dev) < (8, 9):
+                    self.fp8_simulation_mode = True
+            except Exception:
+                pass
 
         # Auto-derive forensic_log_file so callers never get a silent no-op.
         if self.enable_forensic_logging and self.forensic_log_file is None:
