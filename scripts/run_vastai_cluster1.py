@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Vast.ai Automated Orchestration Runner: Klaster 1 (YOLOS APA Threshold Spectrum)
-Runs 5 experiments across the tolerance spectrum: lambda in [0.1, 0.3, 0.5, 0.7, 0.9].
+Runs 3 experiments across the overflow spectrum: gamma in [0.1, 0.5, 0.9] with theta_underflow fixed at 0.9.
 Automatically generates comparative reports, pushes logs to GitHub, and shuts down instance.
 """
 
@@ -13,10 +13,15 @@ import argparse
 import subprocess
 from typing import Dict, Any, List
 
-LAMBDA_SPECTRUM = [0.1, 0.3, 0.5, 0.7, 0.9]
+DEFAULT_GAMMA_LIST = [0.1, 0.5, 0.9]
+DEFAULT_THETA_UNDERFLOW = 0.9
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Klaster 1 YOLOS APA Threshold Spectrum Suite on Vast.ai")
+    parser.add_argument('--gamma_list', type=float, nargs='+', default=DEFAULT_GAMMA_LIST,
+                        help="List of gamma overflow thresholds to test (default: 0.1 0.5 0.9)")
+    parser.add_argument('--theta_underflow', type=float, default=DEFAULT_THETA_UNDERFLOW,
+                        help="Fixed underflow ratio threshold (default: 0.9)")
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs per run (default: 50)")
     parser.add_argument('--batch_size', type=int, default=16, help="Batch size (default: 16)")
     parser.add_argument('--imgsz', type=int, default=512, help="Image resolution (default: 512)")
@@ -84,20 +89,20 @@ def is_run_completed(log_path: str, target_epochs: int) -> bool:
     _, epochs, _ = parse_jsonl(log_path)
     return len(epochs) >= target_epochs
 
-def run_single_experiment(val_lambda: float, args: argparse.Namespace, base_dir: str):
-    tag = f"lambda_{val_lambda}"
+def run_single_experiment(val_gamma: float, val_theta: float, args: argparse.Namespace, base_dir: str):
+    tag = f"gamma_{val_gamma}_theta_{val_theta}"
     save_dir = os.path.join(base_dir, 'runs', f"cluster1_yolos_{tag}")
     log_file = os.path.join(save_dir, "yolos_training.jsonl")
     events_file = os.path.join(save_dir, "yolos_training_apa_events.jsonl")
 
     print("\n" + "=" * 90)
-    print(f"  [KLASTER 1] RUNNING EXPERIMENT: LAMBDA = {val_lambda} (gamma={val_lambda}, theta_uf={val_lambda})")
+    print(f"  [KLASTER 1] RUNNING EXPERIMENT: GAMMA={val_gamma} | THETA_UNDERFLOW={val_theta}")
     print(f"  Target Epochs: {args.epochs} | Batch Size: {args.batch_size} | Check Interval: {args.check_interval}")
     print(f"  CUDA Graph: {args.cuda_graph} | Save Dir: {save_dir}")
     print("=" * 90, flush=True)
 
     if is_run_completed(log_file, args.epochs):
-        print(f"[*] Found completed run for lambda={val_lambda} ({args.epochs} epochs). Skipping to next.")
+        print(f"[*] Found completed run for gamma={val_gamma}, theta={val_theta} ({args.epochs} epochs). Skipping.")
         return log_file, events_file
 
     os.makedirs(save_dir, exist_ok=True)
@@ -107,8 +112,8 @@ def run_single_experiment(val_lambda: float, args: argparse.Namespace, base_dir:
         "--model", "hustvl/yolos-small",
         "--data_dir", args.data_dir,
         "--precision", "apa",
-        "--gamma", str(val_lambda),
-        "--theta_underflow", str(val_lambda),
+        "--gamma", str(val_gamma),
+        "--theta_underflow", str(val_theta),
         "--check_interval", str(args.check_interval),
         "--epochs", str(args.epochs),
         "--batch_size", str(args.batch_size),
@@ -132,25 +137,28 @@ def run_single_experiment(val_lambda: float, args: argparse.Namespace, base_dir:
     elapsed = time.time() - t0
 
     if proc.returncode != 0:
-        raise RuntimeError(f"Experiment lambda={val_lambda} failed with exit code {proc.returncode}")
+        raise RuntimeError(f"Experiment gamma={val_gamma}, theta={val_theta} failed with exit code {proc.returncode}")
 
-    print(f"[✓] Experiment lambda={val_lambda} completed successfully in {elapsed/60:.2f} minutes.")
+    print(f"[✓] Experiment gamma={val_gamma}, theta={val_theta} completed in {elapsed/60:.2f} minutes.")
     return log_file, events_file
 
-def generate_cluster1_report(results: List[Dict[str, Any]], report_path: str):
+def generate_cluster1_report(results: List[Dict[str, Any]], theta_val: float, report_path: str):
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    headers = ["Metrik Evaluasi"] + [f"$\\gamma={r['gamma']}$ ($\\theta={theta_val}$)" for r in results]
+    aligns = [":---"] + [":---:" for _ in results]
+
     lines = [
-        "# Laporan Evaluasi Komparatif: Klaster 1 YOLOS APA (Spektrum Ambang Batas)",
-        "## Evaluasi Sensitivitas Lambda $\\lambda = \\gamma = \\theta_{\\text{underflow}} \\in [0.1, 0.9]$ pada 50 Epoch Lengkap",
+        "# Laporan Evaluasi Komparatif: Klaster 1 YOLOS APA (Spektrum Overflow)",
+        f"## Evaluasi Sensitivitas Gamma $\\gamma \\in [0.1, 0.5, 0.9]$ dengan Underflow Tetap $\\theta = {theta_val}$ (50 Epochs)",
         "",
-        "Laporan ini mendokumentasikan hasil pengujian komprehensif pengaruh ambang batas toleransi APA pada model **YOLOS-Small** (27.4M parameter) dengan akselerasi **Hybrid CUDA Graph**.",
+        "Laporan ini mendokumentasikan hasil pengujian komprehensif pengaruh ambang batas overflow $\\gamma$ pada model **YOLOS-Small** (27.4M parameter) dengan akselerasi **Hybrid CUDA Graph**.",
         "",
         "---",
         "",
         "### 1. Ringkasan Kinerja Keseluruhan (50 Epochs)",
         "",
-        "| Metrik Evaluasi | $\\lambda=0.1$ (Ultra-Konservatif) | $\\lambda=0.3$ (Konservatif) | $\\lambda=0.5$ (Jangkar/Moderat) | $\\lambda=0.7$ (Agresif) | $\\lambda=0.9$ (Ultra-Agresif) |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: |"
+        f"| {' | '.join(headers)} |",
+        f"| {' | '.join(aligns)} |"
     ]
 
     def fmt(val, template="{:.4f}"):
@@ -186,8 +194,8 @@ def generate_cluster1_report(results: List[Dict[str, Any]], report_path: str):
     lines.append("---")
     lines.append("")
     lines.append("### 2. Analisis Ilmiah & Kesimpulan Sensitivitas Parameter")
-    lines.append("1. **Trade-off Throughput vs Stabilitas**: Mengamati pergeseran nilai $\\lambda$ dari 0.1 ke 0.9 memperlihatkan kurva Pareto antara penahanan layer pada level FP8 dan ketahanan terhadap gradien instabil.")
-    lines.append("2. **Efektivitas Ambang Batas**: Menemukan titik transisi kritis di mana model mempertahankan kecepatan optimal tanpa memicu degradasi bounding box regression.")
+    lines.append("1. **Isolasi Variabel Overflow (Gamma)**: Dengan mengunci $\\theta_{\\text{underflow}}=0.9$, toleransi underflow dibuka lebar sehingga eskalasi layer murni dipicu oleh lonjakan magnitudo tensor yang melampaui $T_{\\text{max}} = \\gamma \\times \\text{dtype\\_max}$.")
+    lines.append("2. **Perilaku $\\gamma=0.1$ vs $\\gamma=0.9$**: Mengamati apakah batasan overflow ketat ($\\gamma=0.1$, $T_{\\text{max}}=44.8$) memicu promosi layer lebih dini ke FP16/TF32 dibanding batasan longgar ($\\gamma=0.9$, $T_{\\text{max}}=403.2$).")
     lines.append("")
 
     with open(report_path, 'w', encoding='utf-8') as f:
@@ -279,14 +287,14 @@ def main():
 
     print("=" * 90)
     print("  VAST.AI ORCHESTRATION SUITE: KLASTER 1 (YOLOS APA THRESHOLD SPECTRUM)")
-    print(f"  Spectrum Points: {LAMBDA_SPECTRUM}")
+    print(f"  Gamma List: {args.gamma_list} | Fixed Theta Underflow: {args.theta_underflow}")
     print(f"  Target Epochs: {args.epochs} | Batch Size: {args.batch_size} | CUDA Graph: {args.cuda_graph}")
     print(f"  On Finish: {args.on_finish.upper()}")
     print("=" * 90)
 
     results = []
-    for val_lambda in LAMBDA_SPECTRUM:
-        log_file, events_file = run_single_experiment(val_lambda, args, base_dir)
+    for val_gamma in args.gamma_list:
+        log_file, events_file = run_single_experiment(val_gamma, args.theta_underflow, args, base_dir)
         header, epochs, steps = parse_jsonl(log_file)
         ev_counts = count_escalation_events(events_file)
 
@@ -297,7 +305,8 @@ def main():
         peak_vram = max([e.get('peak_vram_mb', 0) for e in epochs] + [0])
 
         results.append({
-            'lambda': val_lambda,
+            'gamma': val_gamma,
+            'theta_underflow': args.theta_underflow,
             'total_time_min': total_time_min,
             'avg_fps': avg_fps,
             'avg_latency_ms': avg_lat,
@@ -313,7 +322,7 @@ def main():
 
     # Generate Markdown Report
     report_file = os.path.join(base_dir, 'result', 'cluster1_yolos_threshold_spectrum_report.md')
-    generate_cluster1_report(results, report_file)
+    generate_cluster1_report(results, args.theta_underflow, report_file)
 
     # Push to GitHub
     push_ok = auto_push_results_to_github(args.github_pat, base_dir)

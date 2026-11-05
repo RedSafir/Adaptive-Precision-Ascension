@@ -2,7 +2,8 @@
 set -e
 
 echo "================================================================="
-echo "  VAST.AI ONSTART INITIALIZER: KLASTER 1 (YOLOS APA 50 EPOCHS)   "
+echo "  VAST.AI ONSTART: KLASTER 1 (YOLOS APA 3 RUNS: GAMMA 0.1/0.5/0.9)"
+echo "  Fixed Underflow Threshold: theta_underflow = 0.9               "
 echo "================================================================="
 
 # 1. Setup GitHub Credentials & Pull Repository
@@ -43,9 +44,11 @@ echo "[*] Installing dependencies & building APA kernels..."
 pip install -e ".[examples]"
 pip install vastai -q
 
-# 4. Launch Klaster 1 50-Epoch Orchestration Suite
-echo "[*] Launching Klaster 1 Orchestration Suite (50 Epochs, Hybrid CUDA Graph)..."
+# 4. Launch Klaster 1 50-Epoch Orchestration Suite (3 Runs)
+echo "[*] Launching Klaster 1 Suite (50 Epochs, Hybrid CUDA Graph, Gamma 0.1/0.5/0.9, Theta 0.9)..."
 python scripts/run_vastai_cluster1.py \
+    --gamma_list 0.1 0.5 0.9 \
+    --theta_underflow 0.9 \
     --epochs 50 \
     --batch_size 16 \
     --check_interval 8 \
