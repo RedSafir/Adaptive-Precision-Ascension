@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument('--check_interval', type=int, default=8, help="Soft-check interval in steps (default: 8)")
     parser.add_argument('--enable_frobenius', action='store_true', default=True, help="Enable Frobenius norm diagnostic telemetry (default: True)")
     parser.add_argument('--no_frobenius', dest='enable_frobenius', action='store_false', help="Disable Frobenius norm telemetry")
-    parser.add_argument('--frobenius_check_interval', type=int, default=8, help="Step interval for Frobenius norm logging (default: 8)")
+    parser.add_argument('--frobenius_check_interval', type=int, default=0, help="Step interval for Frobenius norm logging (0 = sync with check_interval)")
     parser.add_argument('--cuda_graph', action='store_true', default=True, help="Enable Hybrid CUDA Graph acceleration")
     parser.add_argument('--no_cuda_graph', dest='cuda_graph', action='store_false', help="Disable CUDA Graph")
     parser.add_argument('--data_dir', type=str, default='datasets/detection-person-and-ball/merged_yolo_person_ball',
@@ -133,7 +133,7 @@ def run_single_experiment(val_gamma: float, val_theta: float, args: argparse.Nam
     if args.enable_frobenius:
         cmd.extend([
             "--enable_frobenius_telemetry",
-            "--frobenius_check_interval", str(args.frobenius_check_interval)
+            "--frobenius_check_interval", str(args.frobenius_check_interval if args.frobenius_check_interval > 0 else args.check_interval)
         ])
     if args.smoke_test:
         cmd.extend(["--max_steps", "3"])

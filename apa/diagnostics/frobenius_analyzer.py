@@ -112,11 +112,20 @@ class FrobeniusTelemetry:
             effective_lr = float(lr) if lr is not None else 1.0
             update_ratio = (effective_lr * grad_norm) / (weight_norm + 1e-12)
 
+            # 5. Extract AMAX if tracked on module
+            amax_val = None
+            if hasattr(module, 'gpu_amax') and module.gpu_amax is not None:
+                try:
+                    amax_val = float(module.gpu_amax.item())
+                except Exception:
+                    pass
+
             metrics.append({
                 "name": name,
                 "weight_norm": weight_norm,
                 "grad_norm": grad_norm,
                 "update_ratio": float(update_ratio),
+                "amax": amax_val,
                 "level": getattr(module, 'level', None)
             })
 
@@ -234,9 +243,12 @@ class FrobeniusTelemetry:
                 self.consecutive_outliers[name] = 0
                 self.last_outliers.pop(name, None)
 
+        max_amax = max([m['amax'] for m in layer_metrics if m.get('amax') is not None] + [0.0])
+
         evaluation_result = {
             "step": step,
             "num_layers": L,
+            "max_amax": float(max_amax),
             "weight_disparity": float(weight_disparity),
             "grad_disparity": float(grad_disparity),
             "disparity_warning": disparity_warning,
@@ -266,11 +278,18 @@ class FrobeniusTelemetry:
                 if weight is not None:
                     w_norm = float(torch.norm(weight.float(), p='fro').item())
                     weight_norms.append(w_norm)
+                    amax_val = None
+                    if hasattr(module, 'gpu_amax') and module.gpu_amax is not None:
+                        try:
+                            amax_val = float(module.gpu_amax.item())
+                        except Exception:
+                            pass
                     metrics.append({
                         "name": name,
                         "weight_norm": w_norm,
                         "grad_norm": 0.0,
                         "update_ratio": 0.0,
+                        "amax": amax_val,
                         "level": getattr(module, 'level', None)
                     })
 

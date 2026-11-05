@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument('--check_interval', type=int, default=1, help="Evaluation interval for soft checks in APA")
     parser.add_argument('--cuda_graph', action='store_true', help="Enable Hybrid CUDA Graph acceleration on YOLOS ViT Backbone")
     parser.add_argument('--enable_frobenius_telemetry', action='store_true', help="Enable Frobenius norm diagnostic telemetry")
-    parser.add_argument('--frobenius_check_interval', type=int, default=8, help="Step interval for Frobenius norm logging")
+    parser.add_argument('--frobenius_check_interval', type=int, default=0, help="Step interval for Frobenius norm logging (0 = sync with check_interval)")
     parser.add_argument('--frobenius_log_file', type=str, default=None, help="Path to save Frobenius JSONL log")
     parser.add_argument('--workers', type=int, default=4, help="Number of DataLoader worker processes")
     parser.add_argument('--max_steps', type=int, default=0, help="Max steps per epoch (0 = full epoch)")
@@ -163,7 +163,8 @@ def main():
             apa_cfg.log_file = args.log_file.replace('.jsonl', '_apa_events.jsonl')
         if args.enable_frobenius_telemetry:
             apa_cfg.enable_frobenius_telemetry = True
-            apa_cfg.frobenius_check_interval = args.frobenius_check_interval
+            frob_interval = args.frobenius_check_interval if args.frobenius_check_interval > 0 else args.check_interval
+            apa_cfg.frobenius_check_interval = frob_interval
             if args.frobenius_log_file:
                 apa_cfg.frobenius_log_file = args.frobenius_log_file
             elif args.log_file:
@@ -333,6 +334,9 @@ def main():
                 'fps': curr_fps,
                 'vram_mb': curr_vram_mb
             }
+            if apa_manager is not None and getattr(apa_manager, 'frobenius_telemetry', None) is not None:
+                if apa_manager.frobenius_telemetry.last_evaluation:
+                    step_record['max_amax'] = apa_manager.frobenius_telemetry.last_evaluation.get('max_amax', 0.0)
             log_fd.write(json.dumps(step_record) + '\n')
             if (step_idx + 1) % 50 == 0:
                 log_fd.flush()
