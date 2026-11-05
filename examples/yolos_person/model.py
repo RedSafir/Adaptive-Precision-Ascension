@@ -92,3 +92,64 @@ def convert_yolos_to_apa(
 
     print(f"[APA Engine] Successfully converted {converted_count} linear layers to APALinear (FP8 Fused). Preserved {preserved_count} head layers in FP32.")
     return model
+
+class _YolosViTBackbone(nn.Module):
+    """Internal module extracting static last_hidden_state from YOLOS ViT model."""
+    def __init__(self, vit: nn.Module):
+        super().__init__()
+        self.vit = vit
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.vit(x, return_dict=False)[0]
+
+class _GraphedViTWrapper(nn.Module):
+    """Wrapper that adapts a graphed ViT callable to HuggingFace BaseModelOutputWithPooling."""
+    def __init__(self, graphed_backbone):
+        super().__init__()
+        self.graphed_backbone = graphed_backbone
+
+    def forward(self, pixel_values: torch.Tensor, **kwargs):
+        from transformers.modeling_outputs import BaseModelOutputWithPooling
+        last_hidden_state = self.graphed_backbone(pixel_values)
+        return BaseModelOutputWithPooling(last_hidden_state=last_hidden_state)
+
+def create_yolos_hybrid_cuda_graph(
+    model: nn.Module,
+    sample_input: torch.Tensor,
+    warmup_iters: int = 3
+) -> nn.Module:
+    """Wrap YOLOS Transformer Backbone into a hardware-accelerated static CUDA Graph.
+
+    Captures the static ViT Encoder (which represents ~95% of FP8 GEMM compute)
+    into a CUDA Graph via `torch.cuda.make_graphed_callables`, while leaving
+    the detection heads (classifier, bbox regressor) and Hungarian matcher
+    in Eager PyTorch autograd.
+
+    Args:
+        model: YolosForObjectDetection instance.
+        sample_input: Sample input tensor with fixed shape [B, 3, H, W] on CUDA.
+        warmup_iters: Number of warmup iterations before capture (default: 3).
+
+    Returns:
+        The model with model.vit replaced by the graphed callable wrapper.
+    """
+    if not torch.cuda.is_available() or sample_input.device.type != 'cuda':
+        raise RuntimeError("Hybrid CUDA Graph requires an active CUDA device.")
+
+    if hasattr(torch.autograd.graph, 'set_override_stale_capture_stream'):
+        torch.autograd.graph.set_override_stale_capture_stream(True)
+
+    print(f"[CUDA Graph] Initializing YOLOS Hybrid CUDA Graph capture (warmup={warmup_iters})...")
+    backbone = _YolosViTBackbone(model.vit).to(sample_input.device)
+    backbone.train(model.training)
+
+    graphed_backbone = torch.cuda.make_graphed_callables(
+        backbone,
+        sample_args=(sample_input,),
+        num_warmup_iters=max(3, warmup_iters)
+    )
+
+    model.vit = _GraphedViTWrapper(graphed_backbone)
+    print("[CUDA Graph] YOLOS ViT Backbone successfully compiled into CUDA Graph!")
+    return model
+

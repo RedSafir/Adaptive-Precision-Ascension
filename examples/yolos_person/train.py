@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore", message=".*You passed `num_labels=2`.*")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from apa import APAConfig, APAManager
 from apa.config import LEVEL_FP8, LEVEL_FP16, LEVEL_TF32
-from examples.yolos_person.model import create_yolos_model, convert_yolos_to_apa
+from examples.yolos_person.model import create_yolos_model, convert_yolos_to_apa, create_yolos_hybrid_cuda_graph
 from examples.yolos_person.dataset import build_dataloader
 
 def get_args():
@@ -33,7 +33,10 @@ def get_args():
                         choices=['fp32', 'apa_fp8', 'apa', 'apa_bf', 'apa_fp8_bf', 'fp16', 'amp', 'amp_fp16', 'tf32'],
                         help="Precision engine: 'fp32' (Pure FP32), 'apa_fp8' (APA FP8 Custom Fused), 'apa' (Adaptive FP8->FP16->TF32), 'apa_bf' (Adaptive APA with FP8_bf & No Delayed Scaling), 'apa_fp8_bf' (Fixed FP8_bf & No Delayed Scaling), 'fp16' (APA Fixed FP16), 'amp' / 'amp_fp16' (PyTorch Native AMP)")
     parser.add_argument('--apa_preset', type=str, default='research', choices=['research', 'conservative', 'aggressive'])
+    parser.add_argument('--gamma', type=float, default=None, help="Override APA gamma overflow safety threshold margin (e.g. 0.1, 0.5, 0.9)")
+    parser.add_argument('--theta_underflow', type=float, default=None, help="Override APA theta silent underflow ratio threshold (e.g. 0.1, 0.5, 0.9)")
     parser.add_argument('--check_interval', type=int, default=1, help="Evaluation interval for soft checks in APA")
+    parser.add_argument('--cuda_graph', action='store_true', help="Enable Hybrid CUDA Graph acceleration on YOLOS ViT Backbone")
     parser.add_argument('--workers', type=int, default=4, help="Number of DataLoader worker processes")
     parser.add_argument('--max_steps', type=int, default=0, help="Max steps per epoch (0 = full epoch)")
     parser.add_argument('--log_file', type=str, default=None, help="Path to save JSONL training log")
@@ -144,6 +147,10 @@ def main():
         apa_cfg.device = 'cuda'
         apa_cfg.check_interval = args.check_interval
         apa_cfg.freeze_level = freeze_level
+        if args.gamma is not None:
+            apa_cfg.gamma = args.gamma
+        if args.theta_underflow is not None:
+            apa_cfg.theta_underflow = args.theta_underflow
         if 'bf' in args.precision:
             apa_cfg.fp8_output_dtype = 'bfloat16'
             apa_cfg.enable_dynamic_scaling = False
@@ -159,6 +166,19 @@ def main():
         trainable_params = [p for p in model.parameters() if p.requires_grad]
 
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+
+    # Compile Hybrid CUDA Graph on YOLOS ViT Backbone if requested
+    if args.cuda_graph and device.type == 'cuda':
+        sample_img = torch.zeros((args.batch_size, 3, args.imgsz, args.imgsz), device=device)
+        if apa_manager is not None:
+            apa_manager.pre_step()
+            _warm_out = model.vit(sample_img)
+            _warm_loss = _warm_out.last_hidden_state.sum()
+            _warm_loss.backward()
+            apa_manager.post_backward_sync_and_eval()
+            optimizer.zero_grad(set_to_none=True)
+            del _warm_out, _warm_loss
+        model = create_yolos_hybrid_cuda_graph(model, sample_img, warmup_iters=3)
 
     # 4. Build DataLoaders
     train_img_dir = os.path.join(args.data_dir, 'images', 'train')
