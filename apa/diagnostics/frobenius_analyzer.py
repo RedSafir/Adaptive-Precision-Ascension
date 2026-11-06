@@ -118,11 +118,12 @@ class FrobeniusTelemetry:
             effective_lr = float(lr) if lr is not None else 1.0
             update_ratio = (effective_lr * grad_norm) / (weight_norm + 1e-12)
 
-            # 5. Extract AMAX if tracked on module
+            # 5. Extract AMAX if tracked on module (including 8-step Frobenius window accumulator)
             amax_val = None
             if hasattr(module, 'gpu_amax') and module.gpu_amax is not None:
                 try:
-                    amax_val = float(module.gpu_amax.item())
+                    amax_val = max(float(module.gpu_amax.item()), float(getattr(module, '_frob_window_amax', 0.0)))
+                    module._frob_window_amax = 0.0
                 except Exception:
                     pass
 

@@ -763,7 +763,7 @@ class APALinear(APAModule):
         # Terminal Ceiling Fast-Path:
         # If this layer has reached LEVEL_TF32 (maximum ceiling), it can never escalate further.
         # Bypass telemetry reductions, custom autograd Function, working copies, and grad sync.
-        if self.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
+        if self.level == LEVEL_TF32 and not self.config.enable_forensic_logging and not getattr(self.config, 'enable_frobenius_telemetry', False):
             w = self.weight_master
             b = self.bias_master
             x_in = x.to(w.dtype) if x.dtype != w.dtype else x
@@ -1126,40 +1126,41 @@ class APAConv2d(APAModule):
                             self.weight_work.device == w_scaled.device and self.weight_work.shape == w_scaled.shape):
                         self.weight_work.copy_(w_scaled)
                     else:
-                        object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+                        object.__setattr__(self, 'weight_work', w_scaled.clone())
                     if b_detached is not None:
                         if self.bias_work is not None and self.bias_work.dtype == torch.float32 and self.bias_work.device == b_detached.device:
                             self.bias_work.copy_(b_detached)
                         else:
-                            object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
+                            object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).clone())
                 else:
                     w_fp8 = w_detached.to(self.working_dtype)
                     if (self.weight_work is not None and self.weight_work.dtype == w_fp8.dtype and
                             self.weight_work.device == w_fp8.device and self.weight_work.shape == w_fp8.shape):
                         self.weight_work.copy_(w_fp8)
                     else:
-                        object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
+                        object.__setattr__(self, 'weight_work', w_fp8.clone())
                     if b_detached is not None:
                         if self.bias_work is not None and self.bias_work.dtype == self.working_dtype and self.bias_work.device == b_detached.device:
                             self.bias_work.copy_(b_detached)
                         else:
-                            object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+                            object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).clone())
             else:
                 target_dtype = self.working_dtype
                 if (self.weight_work is not None and self.weight_work.dtype == target_dtype and
                         self.weight_work.device == w_detached.device and self.weight_work.shape == w_detached.shape):
                     self.weight_work.copy_(w_detached)
                 else:
-                    object.__setattr__(self, 'weight_work', w_detached.to(target_dtype).requires_grad_(self.weight_master.requires_grad))
+                    object.__setattr__(self, 'weight_work', w_detached.to(target_dtype).clone())
                 if b_detached is not None:
                     if self.bias_work is not None and self.bias_work.dtype == target_dtype and self.bias_work.device == b_detached.device:
                         self.bias_work.copy_(b_detached)
                     else:
-                        object.__setattr__(self, 'bias_work', b_detached.to(target_dtype).requires_grad_(self.bias_master.requires_grad))
+                        object.__setattr__(self, 'bias_work', b_detached.to(target_dtype).clone())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Terminal Ceiling Fast-Path:
-        if self.level == LEVEL_TF32 and not self.config.enable_forensic_logging:
+        if (self.level == LEVEL_TF32 and not self.config.enable_forensic_logging
+                and not getattr(self.config, 'enable_frobenius_telemetry', False)):
             w = self.weight_master
             b = self.bias_master
             x_in = x.to(w.dtype) if x.dtype != w.dtype else x

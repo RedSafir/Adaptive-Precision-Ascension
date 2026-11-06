@@ -229,9 +229,13 @@ class APAManager:
                 module.gpu_underflow_ratio.zero_()
                 module.gpu_has_nonfinite.zero_()
                 module.ema_underflow_ratio = 0.0
+                module._apa_window_amax = 0.0
+                module._frob_window_amax = 0.0
             for module in self.other_modules.values():
                 module.gpu_amax.zero_()
                 module.gpu_has_nonfinite.zero_()
+                module._apa_window_amax = 0.0
+                module._frob_window_amax = 0.0
 
     # ------------------------------------------------------------------
     # Detection helpers
@@ -289,7 +293,7 @@ class APAManager:
                 for i, (name, module) in enumerate(mod_items):
                     if module.level == LEVEL_TF32:
                         continue
-                    amax_val = all_amax[i]
+                    amax_val = max(float(all_amax[i]), float(getattr(module, '_apa_window_amax', 0.0)))
                     underflow_val = all_underflow[i]
                     has_nonfinite = all_nonfinite[i] > 0
                     thresh_max = self.config.get_threshold_max(module.level)
@@ -309,7 +313,7 @@ class APAManager:
                     periodic_data = {}
                     for i, (name, module) in enumerate(mod_items):
                         periodic_data[name] = {
-                            "amax": float(all_amax[i]),
+                            "amax": max(float(all_amax[i]), float(getattr(module, '_apa_window_amax', 0.0))),
                             "underflow_ratio": float(all_underflow[i]),
                             "ema_underflow": float(module.ema_underflow_ratio),
                             "level": module.level,
@@ -317,8 +321,12 @@ class APAManager:
                         }
                     self.logger.log_periodic_telemetry(self.step_count, periodic_data)
 
-                for _, module in mod_items:
+                is_frob_step = (self.frobenius_telemetry is not None and (self.step_count % self.config.frobenius_check_interval == 0))
+                for i, (_, module) in enumerate(mod_items):
+                    if self.frobenius_telemetry is not None and not is_frob_step:
+                        module._frob_window_amax = max(float(getattr(module, '_frob_window_amax', 0.0)), float(all_amax[i]))
                     module.gpu_amax.zero_()
+                    module._apa_window_amax = 0.0
                     if hasattr(module, 'gpu_amax_x'):
                         module.gpu_amax_x.zero_()
                     if hasattr(module, 'gpu_amax_grad'):
@@ -332,9 +340,10 @@ class APAManager:
                 other_items = list(self.other_modules.items())
                 other_amax = torch.cat([m.gpu_amax for _, m in other_items]).cpu().tolist()
                 other_nonfinite = torch.cat([m.gpu_has_nonfinite for _, m in other_items]).cpu().tolist()
+                is_frob_step = (self.frobenius_telemetry is not None and (self.step_count % self.config.frobenius_check_interval == 0))
 
                 for i, (name, module) in enumerate(other_items):
-                    amax_val = other_amax[i]
+                    amax_val = max(float(other_amax[i]), float(getattr(module, '_apa_window_amax', 0.0)))
                     has_nonfinite = other_nonfinite[i] > 0
                     if has_nonfinite or math.isinf(amax_val) or math.isnan(amax_val) or amax_val > self.config.get_threshold_max(min_apa_level):
                         batch_has_overflow = True
@@ -345,7 +354,10 @@ class APAManager:
                             min_apa_level, min_apa_level, trigger_val
                         )
 
+                    if self.frobenius_telemetry is not None and not is_frob_step:
+                        module._frob_window_amax = max(float(getattr(module, '_frob_window_amax', 0.0)), float(other_amax[i]))
                     module.gpu_amax.zero_()
+                    module._apa_window_amax = 0.0
                     module.gpu_has_nonfinite.zero_()
 
         if batch_has_overflow:
@@ -513,16 +525,22 @@ class APAManager:
         self._sync_grads_to_master()
 
         # Frobenius norm diagnostic telemetry (opt-in)
+        frob_ran = False
         if self.frobenius_telemetry is not None and (self.step_count % self.config.frobenius_check_interval == 0):
             with torch.no_grad():
                 metrics = self.frobenius_telemetry.collect_step_metrics(self.model, self.step_count)
                 eval_res = self.frobenius_telemetry.evaluate_instability(self.step_count, metrics)
                 self.frobenius_telemetry.log_step(self.step_count, eval_res)
+                frob_ran = True
+                for m in list(self.apa_modules.values()) + list(self.other_modules.values()):
+                    if hasattr(m, 'gpu_amax') and m.gpu_amax is not None:
+                        m._apa_window_amax = max(float(getattr(m, '_apa_window_amax', 0.0)), float(m.gpu_amax.item()))
 
         if self.config.freeze_level is not None:
             with torch.no_grad():
                 for module in self.apa_modules.values():
                     module.gpu_amax.zero_()
+                    module._apa_window_amax = 0.0
                     if hasattr(module, 'gpu_amax_x'):
                         module.gpu_amax_x.zero_()
                     if hasattr(module, 'gpu_amax_grad'):
@@ -535,6 +553,10 @@ class APAManager:
             return self._do_full_evaluation()
 
         with torch.no_grad():
+            if frob_ran:
+                for m in list(self.apa_modules.values()) + list(self.other_modules.values()):
+                    if hasattr(m, 'gpu_amax') and m.gpu_amax is not None:
+                        m.gpu_amax.zero_()
             for module in self.apa_modules.values():
                 if hasattr(module, 'gpu_amax_x'):
                     module.gpu_amax_x.zero_()
