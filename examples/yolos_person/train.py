@@ -147,6 +147,9 @@ def main():
         else:
             apa_cfg = APAConfig.aggressive_default()
 
+        if args.log_file is None:
+            args.log_file = os.path.join(args.save_dir, f"yolos_{args.precision}_training.jsonl")
+
         apa_cfg.device = 'cuda'
         apa_cfg.check_interval = args.check_interval
         apa_cfg.freeze_level = freeze_level
@@ -344,6 +347,8 @@ def main():
             log_fd.write(json.dumps(step_record) + '\n')
             if (step_idx + 1) % 50 == 0:
                 log_fd.flush()
+
+            del outputs, loss, loss_dict
 
         epoch_duration_sec = time.time() - epoch_start_time
         num_steps_completed = len(step_times)

@@ -161,6 +161,7 @@ def run_single_taguchi_experiment(cfg: Dict[str, Any], args, base_dir: str):
         '--check_interval', str(val_ci),
         '--data_dir', args.data_dir,
         '--save_dir', save_dir,
+        '--log_file', log_file,
     ]
 
     if args.cuda_graph:

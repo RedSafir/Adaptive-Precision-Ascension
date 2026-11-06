@@ -63,16 +63,27 @@ which python || ln -sf /usr/bin/python3 /usr/bin/python
 python3 -m pip install opencv-python-headless scipy transformers accelerate tqdm pillow datasets huggingface_hub vastai -q
 python3 -m pip install -e ".[examples]"
 
-# 4. Launch Single Test Runner (Default 2 epochs for sanity test, or overridden by TEST_EPOCHS)
-EPOCHS_TO_RUN="${TEST_EPOCHS:-2}"
-GAMMA_TO_RUN="${TEST_GAMMA:-0.1}"
-echo "[*] Launching Single Test (Epochs: $EPOCHS_TO_RUN, Gamma: $GAMMA_TO_RUN, Theta Underflow: 0.9, Hybrid CUDA Graph)..."
-python3 scripts/run_vastai_single_test.py \
-    --gamma "$GAMMA_TO_RUN" \
-    --theta_underflow 0.9 \
-    --epochs "$EPOCHS_TO_RUN" \
-    --batch_size 16 \
-    --check_interval 8 \
-    --cuda_graph \
-    --on_finish "${ON_FINISH:-stop}" \
-    --github_pat "${GITHUB_PAT}"
+# 4. Launch Runner (Taguchi L9 Suite or Single Test)
+if [ "${RUN_MODE:-taguchi}" = "single" ]; then
+    EPOCHS_TO_RUN="${TEST_EPOCHS:-2}"
+    GAMMA_TO_RUN="${TEST_GAMMA:-0.1}"
+    echo "[*] Launching Single Test (Epochs: $EPOCHS_TO_RUN, Gamma: $GAMMA_TO_RUN, Theta Underflow: 0.9, Hybrid CUDA Graph)..."
+    python3 scripts/run_vastai_single_test.py \
+        --gamma "$GAMMA_TO_RUN" \
+        --theta_underflow 0.9 \
+        --epochs "$EPOCHS_TO_RUN" \
+        --batch_size 16 \
+        --check_interval 8 \
+        --cuda_graph \
+        --on_finish "${ON_FINISH:-stop}" \
+        --github_pat "${GITHUB_PAT}"
+else
+    echo "[*] Launching Taguchi L9 Autonomous Suite (50 epochs per run)..."
+    python3 scripts/run_vastai_taguchi_l9.py \
+        --epochs "${TAGUCHI_EPOCHS:-50}" \
+        --batch_size 16 \
+        --cuda_graph \
+        --enable_frobenius \
+        --on_finish "${ON_FINISH:-stop}" \
+        --github_pat "${GITHUB_PAT}"
+fi

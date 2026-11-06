@@ -146,6 +146,6 @@ def build_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=yolo_collate_fn,
-        pin_memory=True,
+        pin_memory=False,
         drop_last=True
     )

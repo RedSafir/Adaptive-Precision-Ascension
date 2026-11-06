@@ -140,10 +140,11 @@ class _GraphedViTWrapper(nn.Module):
 
     def _capture(self, sample_input: torch.Tensor, is_initial: bool = False):
         from apa.layers import APAModule
+        torch.cuda.synchronize()
         if self.graphed_backbone is not None:
             del self.graphed_backbone
             self.graphed_backbone = None
-            torch.cuda.synchronize(sample_input.device)
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         # Ensure all working copies and telemetry flags are ready before capture
@@ -155,7 +156,8 @@ class _GraphedViTWrapper(nn.Module):
                         m.refresh_working_copy()
 
         self._raw_vit.zero_grad(set_to_none=True)
-        sample_buf = sample_input.detach().clone()
+        torch.cuda.synchronize()
+        sample_buf = sample_input.detach().clone().contiguous()
         backbone = _YolosViTBackbone(self._raw_vit).to(sample_buf.device)
         backbone.train(self._raw_vit.training)
 
@@ -168,6 +170,7 @@ class _GraphedViTWrapper(nn.Module):
         # Clean up any dummy gradients and amax spikes generated during make_graphed_callables warmup
         self._reset_vit_telemetry_and_grads()
         self._last_levels = self._get_apa_levels()
+        torch.cuda.synchronize()
         if not is_initial:
             print(f"[CUDA Graph] Re-captured YOLOS ViT Backbone after APA precision escalation!", flush=True)
 
