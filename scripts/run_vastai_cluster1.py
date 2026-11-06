@@ -9,12 +9,28 @@ import os
 import sys
 import time
 import json
+import gzip
+import shutil
 import argparse
 import subprocess
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 DEFAULT_GAMMA_LIST = [0.1, 0.5, 0.9]
 DEFAULT_THETA_UNDERFLOW = 0.9
+DEFAULT_HF_REPO_ID = "miftahN/apa-research-telemetry"
+
+def _get_default_hf_token() -> Optional[str]:
+    token = os.environ.get('HF_TOKEN', None)
+    if token:
+        return token.strip()
+    token_path = os.path.expanduser('~/.cache/huggingface/token')
+    if os.path.exists(token_path):
+        try:
+            with open(token_path, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Klaster 1 YOLOS APA Threshold Spectrum Suite on Vast.ai")
@@ -30,13 +46,17 @@ def parse_args():
     parser.add_argument('--check_interval', type=int, default=8, help="Soft-check interval in steps (default: 8)")
     parser.add_argument('--enable_frobenius', action='store_true', default=True, help="Enable Frobenius norm diagnostic telemetry (default: True)")
     parser.add_argument('--no_frobenius', dest='enable_frobenius', action='store_false', help="Disable Frobenius norm telemetry")
-    parser.add_argument('--frobenius_check_interval', type=int, default=0, help="Step interval for Frobenius norm logging (0 = sync with check_interval)")
+    parser.add_argument('--frobenius_check_interval', type=int, default=8, help="Fixed step interval for Frobenius norm logging (default: 8, 0 = sync with check_interval)")
     parser.add_argument('--cuda_graph', action='store_true', default=True, help="Enable Hybrid CUDA Graph acceleration")
     parser.add_argument('--no_cuda_graph', dest='cuda_graph', action='store_false', help="Disable CUDA Graph")
     parser.add_argument('--data_dir', type=str, default='datasets/detection-person-and-ball/merged_yolo_person_ball',
                         help="Path to dataset directory")
     parser.add_argument('--github_pat', type=str, default=os.environ.get('GITHUB_PAT', None),
-                        help="GitHub Personal Access Token for auto-pushing results")
+                        help="GitHub Personal Access Token for auto-pushing markdown reports")
+    parser.add_argument('--hf_token', type=str, default=_get_default_hf_token(),
+                        help="Hugging Face token for auto-uploading raw telemetry after each run")
+    parser.add_argument('--hf_repo_id', type=str, default=DEFAULT_HF_REPO_ID,
+                        help=f"Hugging Face dataset repo ID (default: {DEFAULT_HF_REPO_ID})")
     parser.add_argument('--on_finish', type=str, choices=['none', 'stop', 'destroy'], default='stop',
                         help="Action to perform on Vast.ai instance after completion: 'stop', 'destroy', or 'none'")
     parser.add_argument('--smoke_test', action='store_true', help="Run 3 steps per epoch for quick validation")
@@ -212,22 +232,70 @@ def generate_cluster1_report(results: List[Dict[str, Any]], theta_val: float, re
         f.write('\n'.join(lines) + '\n')
     print(f"[✓] Consolidated report written to: {report_path}")
 
+def upload_run_to_huggingface(
+    hf_token: Optional[str],
+    hf_repo_id: str,
+    save_dir: str,
+    report_path: Optional[str],
+    run_tag: str
+) -> bool:
+    if not hf_token:
+        print("[!] HF_TOKEN not provided and ~/.cache/huggingface/token not found. Skipping Hugging Face upload.")
+        return False
+
+    print("\n" + "=" * 80)
+    print(f"  [HUGGING FACE BACKUP] Uploading '{run_tag}' telemetry to {hf_repo_id}...")
+    print("=" * 80, flush=True)
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        api.create_repo(repo_id=hf_repo_id, repo_type="dataset", private=True, exist_ok=True)
+
+        # Compress raw .jsonl files to .jsonl.gz if not already compressed
+        for fname in os.listdir(save_dir):
+            if fname.endswith(".jsonl"):
+                raw_path = os.path.join(save_dir, fname)
+                gz_path = raw_path + ".gz"
+                if not os.path.exists(gz_path) or os.path.getmtime(raw_path) > os.path.getmtime(gz_path):
+                    print(f"[*] Compressing {fname} -> {fname}.gz ...", flush=True)
+                    with open(raw_path, 'rb') as f_in, gzip.open(gz_path, 'wb', compresslevel=6) as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+
+        # Copy markdown report into save_dir if available
+        if report_path and os.path.exists(report_path):
+            shutil.copy2(report_path, os.path.join(save_dir, os.path.basename(report_path)))
+
+        # Upload compressed telemetry & markdown report
+        api.upload_folder(
+            folder_path=save_dir,
+            path_in_repo=run_tag,
+            repo_id=hf_repo_id,
+            repo_type="dataset",
+            allow_patterns=["*.jsonl.gz", "*.md", "*_apa_events.jsonl"],
+            commit_message=f"Upload completed telemetry for {run_tag}"
+        )
+        print(f"[✓] Successfully uploaded '{run_tag}' to Hugging Face dataset: https://huggingface.co/datasets/{hf_repo_id}/tree/main/{run_tag}", flush=True)
+        return True
+    except Exception as e:
+        print(f"[!] Hugging Face upload failed for {run_tag}: {e}", flush=True)
+        return False
+
 def auto_push_results_to_github(github_pat: str, base_dir: str):
     if not github_pat:
         print("[!] GITHUB_PAT not provided. Skipping remote git push.")
         return False
 
     print("\n" + "=" * 80)
-    print("  [GIT AUTO-PUSH] Pushing Cluster 1 Results & Logs to GitHub...")
+    print("  [GIT AUTO-PUSH] Pushing Cluster 1 Markdown Reports to GitHub...")
     print("=" * 80)
     try:
         subprocess.run(["git", "config", "user.name", "RedSafir"], cwd=base_dir, check=True)
         subprocess.run(["git", "config", "user.email", "mfthnugraha@gmail.com"], cwd=base_dir, check=True)
-        subprocess.run(["git", "add", "-f", "result/", "runs/"], cwd=base_dir, check=True)
+        subprocess.run(["git", "add", "result/"], cwd=base_dir, check=True)
 
         status = subprocess.run(["git", "status", "--porcelain"], cwd=base_dir, capture_output=True, text=True)
         if status.stdout.strip():
-            subprocess.run(["git", "commit", "-m", "chore(vastai): auto-commit cluster 1 50-epoch results [skip ci]"], cwd=base_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "chore(vastai): auto-commit cluster 1 50-epoch report [skip ci]"], cwd=base_dir, check=True)
         else:
             print("[*] No new file changes to commit.")
 
@@ -243,9 +311,9 @@ def auto_push_results_to_github(github_pat: str, base_dir: str):
             print(f"[!] Push to main failed, pushing to fallback branch {fallback_branch}...")
             subprocess.run(["git", "rebase", "--abort"], cwd=base_dir, check=False, env=env)
             subprocess.run(["git", "push", remote_url, f"HEAD:refs/heads/{fallback_branch}"], cwd=base_dir, check=True, env=env)
-            print(f"[✓] Cluster 1 results pushed to fallback branch {fallback_branch}!")
+            print(f"[✓] Cluster 1 report pushed to fallback branch {fallback_branch}!")
         else:
-            print("[✓] All results successfully pushed to GitHub origin/main!")
+            print("[✓] All markdown reports successfully pushed to GitHub origin/main!")
         return True
     except Exception as e:
         print(f"[!] Git push failed: {e}")
@@ -313,9 +381,13 @@ def main():
     print("=" * 90, flush=True)
 
     results = []
+    report_file = os.path.join(base_dir, 'result', 'cluster1_yolos_threshold_spectrum_report.md')
     try:
         for val_gamma in args.gamma_list:
             log_file, events_file = run_single_experiment(val_gamma, args.theta_underflow, args, base_dir)
+            save_dir = os.path.dirname(log_file)
+            run_tag = f"yolos_apa_gamma{val_gamma}_theta{args.theta_underflow}_ci{args.check_interval}_epochs{args.epochs}"
+
             header, epochs, steps = parse_jsonl(log_file)
             ev_counts = count_escalation_events(events_file)
 
@@ -340,15 +412,22 @@ def main():
                 'underflow_events': ev_counts['SILENT_UNDERFLOW'],
                 'overflow_events': ev_counts['OVERFLOW']
             })
-            # Incremental commit/push after each gamma run so progress is never lost
+
+            # Incremental report generation, Hugging Face telemetry upload, and GitHub report push after each run
+            try:
+                generate_cluster1_report(results, args.theta_underflow, report_file)
+            except Exception as rep_err:
+                print(f"[!] Exception generating incremental report: {rep_err}", flush=True)
+
+            try:
+                upload_run_to_huggingface(args.hf_token, args.hf_repo_id, save_dir, report_file, run_tag)
+            except Exception as hf_err:
+                print(f"[!] Exception during Hugging Face upload: {hf_err}", flush=True)
+
             try:
                 auto_push_results_to_github(args.github_pat, base_dir)
             except Exception:
                 pass
-
-        # Generate Markdown Report
-        report_file = os.path.join(base_dir, 'result', 'cluster1_yolos_threshold_spectrum_report.md')
-        generate_cluster1_report(results, args.theta_underflow, report_file)
     except Exception as e:
         print(f"[ERROR] Exception during Klaster 1 execution: {e}", flush=True)
     finally:

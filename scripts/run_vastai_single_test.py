@@ -9,12 +9,28 @@ import os
 import sys
 import time
 import json
+import gzip
+import shutil
 import argparse
 import subprocess
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 DEFAULT_GAMMA = 0.9
 DEFAULT_THETA_UNDERFLOW = 0.9
+DEFAULT_HF_REPO_ID = "miftahN/apa-research-telemetry"
+
+def _get_default_hf_token() -> Optional[str]:
+    env_tok = os.environ.get('HF_TOKEN', None)
+    if env_tok:
+        return env_tok.strip()
+    cache_path = os.path.expanduser('~/.cache/huggingface/token')
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Single Test YOLOS APA (gamma=0.9, theta=0.9) on Vast.ai")
@@ -30,13 +46,17 @@ def parse_args():
     parser.add_argument('--check_interval', type=int, default=8, help="Soft-check interval in steps (default: 8)")
     parser.add_argument('--enable_frobenius', action='store_true', default=True, help="Enable Frobenius norm diagnostic telemetry (default: True)")
     parser.add_argument('--no_frobenius', dest='enable_frobenius', action='store_false', help="Disable Frobenius norm telemetry")
-    parser.add_argument('--frobenius_check_interval', type=int, default=0, help="Step interval for Frobenius norm logging (0 = sync with check_interval)")
+    parser.add_argument('--frobenius_check_interval', type=int, default=8, help="Fixed step interval for Frobenius norm logging (default: 8)")
     parser.add_argument('--cuda_graph', action='store_true', default=True, help="Enable Hybrid CUDA Graph acceleration")
     parser.add_argument('--no_cuda_graph', dest='cuda_graph', action='store_false', help="Disable CUDA Graph")
     parser.add_argument('--data_dir', type=str, default='datasets/detection-person-and-ball/merged_yolo_person_ball',
                         help="Path to dataset directory")
     parser.add_argument('--github_pat', type=str, default=os.environ.get('GITHUB_PAT', None),
-                        help="GitHub Personal Access Token for auto-pushing results")
+                        help="GitHub Personal Access Token for auto-pushing markdown reports")
+    parser.add_argument('--hf_token', type=str, default=_get_default_hf_token(),
+                        help="Hugging Face token for uploading raw telemetry to private dataset repo")
+    parser.add_argument('--hf_repo_id', type=str, default=os.environ.get('HF_REPO_ID', DEFAULT_HF_REPO_ID),
+                        help="Hugging Face private dataset repository ID")
     parser.add_argument('--on_finish', type=str, choices=['none', 'stop', 'destroy'], default='stop',
                         help="Action to perform on Vast.ai instance after completion: 'stop', 'destroy', or 'none'")
     parser.add_argument('--smoke_test', action='store_true', help="Run 3 steps per epoch for quick validation")
@@ -195,6 +215,61 @@ def generate_single_test_report(res: Dict[str, Any], report_path: str):
         f.write('\n'.join(lines) + '\n')
     print(f"[✓] Single test report written to: {report_path}")
 
+def upload_run_to_huggingface(save_dir: str, repo_subfolder: str, hf_token: Optional[str], hf_repo_id: str, report_path: Optional[str] = None) -> bool:
+    if not hf_token:
+        print("[!] HF_TOKEN not provided or found. Skipping Hugging Face private storage upload.")
+        return False
+
+    print("\n" + "=" * 80)
+    print(f"  [HF PRIVATE STORAGE] Uploading Telemetry to {hf_repo_id}/{repo_subfolder}...")
+    print("=" * 80, flush=True)
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        api.create_repo(repo_id=hf_repo_id, repo_type="dataset", private=True, exist_ok=True)
+
+        # Compress large JSONL files (.jsonl -> .jsonl.gz)
+        for fname in ["yolos_training.jsonl", "yolos_training_frobenius.jsonl"]:
+            raw_path = os.path.join(save_dir, fname)
+            gz_path = raw_path + ".gz"
+            if os.path.exists(raw_path):
+                print(f"[*] Compressing {fname} -> {fname}.gz...", flush=True)
+                with open(raw_path, 'rb') as f_in, gzip.open(gz_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+
+        files_to_upload = [
+            "yolos_training.jsonl",
+            "yolos_training.jsonl.gz",
+            "yolos_training_apa_events.jsonl",
+            "yolos_training_frobenius.jsonl.gz"
+        ]
+        for fname in files_to_upload:
+            fpath = os.path.join(save_dir, fname)
+            if os.path.exists(fpath):
+                size_mb = os.path.getsize(fpath) / 1e6
+                print(f"[*] Uploading {fname} ({size_mb:.2f} MB)...", flush=True)
+                api.upload_file(
+                    path_or_fileobj=fpath,
+                    path_in_repo=f"{repo_subfolder}/{fname}",
+                    repo_id=hf_repo_id,
+                    repo_type="dataset",
+                    commit_message=f"Upload {fname} for {repo_subfolder}"
+                )
+        if report_path and os.path.exists(report_path):
+            rname = os.path.basename(report_path)
+            api.upload_file(
+                path_or_fileobj=report_path,
+                path_in_repo=f"{repo_subfolder}/{rname}",
+                repo_id=hf_repo_id,
+                repo_type="dataset",
+                commit_message=f"Upload report {rname} for {repo_subfolder}"
+            )
+        print(f"[✓] All telemetry files uploaded to Hugging Face Private Storage ({hf_repo_id}/{repo_subfolder})!", flush=True)
+        return True
+    except Exception as e:
+        print(f"[!] Hugging Face upload failed: {e}", flush=True)
+        return False
+
 def auto_push_results_to_github(github_pat: str, base_dir: str):
     if not github_pat:
         print("[!] GITHUB_PAT not provided. Skipping remote git push.")
@@ -326,10 +401,16 @@ def main():
         # Generate Markdown Report
         report_file = os.path.join(base_dir, 'result', 'single_test_gamma09_theta09_report.md')
         generate_single_test_report(res, report_file)
+
+        # Upload telemetry to Hugging Face Private Storage
+        tag = f"gamma_{args.gamma}_theta_{args.theta_underflow}"
+        save_dir = os.path.join(base_dir, 'runs', f"single_test_yolos_{tag}")
+        repo_subfolder = f"yolos_apa_gamma{args.gamma}_theta{args.theta_underflow}_ci{args.check_interval}_epochs{args.epochs}"
+        upload_run_to_huggingface(save_dir, repo_subfolder, args.hf_token, args.hf_repo_id, report_file)
     except Exception as e:
         print(f"[ERROR] Exception during single test execution: {e}", flush=True)
     finally:
-        # Push whatever logs/reports exist to GitHub and ALWAYS trigger shutdown
+        # Push summary markdown report to GitHub and ALWAYS trigger shutdown
         try:
             auto_push_results_to_github(args.github_pat, base_dir)
         except Exception as push_err:
