@@ -184,13 +184,16 @@ def main():
         if apa_manager is not None:
             apa_manager.pre_step()
             _warm_out = model.vit(sample_img)
-            _warm_loss = _warm_out.last_hidden_state.sum()
+            _warm_loss = _warm_out.last_hidden_state.mean()
             _warm_loss.backward()
-            apa_manager.post_backward_sync_and_eval()
-            apa_manager.step_count = 0
+            apa_manager._sync_grads_to_master()
             optimizer.zero_grad(set_to_none=True)
             del _warm_out, _warm_loss
         model = create_yolos_hybrid_cuda_graph(model, sample_img, warmup_iters=3)
+        if apa_manager is not None:
+            apa_manager.reset_all_telemetry()
+            apa_manager.step_count = 0
+        optimizer.zero_grad(set_to_none=True)
 
     # 4. Build DataLoaders
     train_img_dir = os.path.join(args.data_dir, 'images', 'train')

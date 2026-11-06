@@ -115,7 +115,7 @@ def is_run_completed(log_path: str, target_epochs: int) -> bool:
     return len(epochs) >= target_epochs
 
 def run_single_experiment(val_gamma: float, val_theta: float, args: argparse.Namespace, base_dir: str):
-    tag = f"gamma_{val_gamma}_theta_{val_theta}"
+    tag = f"gamma_{val_gamma}_theta_{val_theta}_ci_{args.check_interval}"
     save_dir = os.path.join(base_dir, 'runs', f"cluster1_yolos_{tag}")
     log_file = os.path.join(save_dir, "yolos_training.jsonl")
     events_file = os.path.join(save_dir, "yolos_training_apa_events.jsonl")

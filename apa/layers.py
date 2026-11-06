@@ -711,28 +711,53 @@ class APALinear(APAModule):
             if self.level == LEVEL_FP8:
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
-                    w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
-                    object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
-
-                    # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
-                    object.__setattr__(self, 'weight_work_t', w_scaled.t())
-                    # Pre-transpose to column-major layout for backward pass grad_input (dX = dY @ W)
-                    object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
+                    w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype).detach()
+                    if (self.weight_work is not None and self.weight_work.dtype == w_scaled.dtype and
+                            self.weight_work.device == w_scaled.device and self.weight_work.shape == w_scaled.shape and
+                            self.weight_work_bwd is not None and self.weight_work_bwd.dtype == w_scaled.dtype and
+                            self.weight_work_bwd.device == w_scaled.device):
+                        self.weight_work.copy_(w_scaled)
+                        self.weight_work_bwd.copy_(w_scaled)
+                    else:
+                        object.__setattr__(self, 'weight_work', w_scaled)
+                        # Pre-transpose to column-major layout for torch._scaled_mm (stride (1, in_features))
+                        object.__setattr__(self, 'weight_work_t', self.weight_work.t())
+                        # Pre-transpose to column-major layout for backward pass grad_input (dX = dY @ W)
+                        object.__setattr__(self, 'weight_work_bwd', w_scaled.t().contiguous().t())
                     if b_detached is not None:
-                        object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
+                        if self.bias_work is not None and self.bias_work.dtype == torch.float32 and self.bias_work.device == b_detached.device:
+                            self.bias_work.copy_(b_detached)
+                        else:
+                            object.__setattr__(self, 'bias_work', b_detached.to(torch.float32))
                 else:
                     w_fp8 = w_detached.to(self.working_dtype)
-                    object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
-                    object.__setattr__(self, 'weight_work_t', w_fp8.t())
-                    object.__setattr__(self, 'weight_work_bwd', w_fp8.t().contiguous().t())
+                    if (self.weight_work is not None and self.weight_work.dtype == w_fp8.dtype and
+                            self.weight_work.device == w_fp8.device and self.weight_work_bwd is not None):
+                        self.weight_work.copy_(w_fp8)
+                        self.weight_work_bwd.copy_(w_fp8)
+                    else:
+                        object.__setattr__(self, 'weight_work', w_fp8)
+                        object.__setattr__(self, 'weight_work_t', self.weight_work.t())
+                        object.__setattr__(self, 'weight_work_bwd', w_fp8.t().contiguous().t())
                     if b_detached is not None:
-                        object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+                        if self.bias_work is not None and self.bias_work.dtype == self.working_dtype and self.bias_work.device == b_detached.device:
+                            self.bias_work.copy_(b_detached)
+                        else:
+                            object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype))
             else:
-                object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                target_dtype = self.working_dtype
+                if (self.weight_work is not None and self.weight_work.dtype == target_dtype and
+                        self.weight_work.device == w_detached.device and self.weight_work.shape == w_detached.shape):
+                    self.weight_work.copy_(w_detached)
+                else:
+                    object.__setattr__(self, 'weight_work', w_detached.to(target_dtype))
                 object.__setattr__(self, 'weight_work_t', None)
                 object.__setattr__(self, 'weight_work_bwd', None)
                 if b_detached is not None:
-                    object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+                    if self.bias_work is not None and self.bias_work.dtype == target_dtype and self.bias_work.device == b_detached.device:
+                        self.bias_work.copy_(b_detached)
+                    else:
+                        object.__setattr__(self, 'bias_work', b_detached.to(target_dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Terminal Ceiling Fast-Path:
@@ -1097,18 +1122,40 @@ class APAConv2d(APAModule):
                 if self.config.enable_dynamic_scaling:
                     fwd_dtype = DTYPE_MAP[LEVEL_FP8] if DTYPE_MAP[LEVEL_FP8] is not None else torch.float32
                     w_scaled = fused_scale_clamp_quantize_fp8(w_detached, self.scale_w, FP8_E4M3_MAX, fwd_dtype)
-                    object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
+                    if (self.weight_work is not None and self.weight_work.dtype == w_scaled.dtype and
+                            self.weight_work.device == w_scaled.device and self.weight_work.shape == w_scaled.shape):
+                        self.weight_work.copy_(w_scaled)
+                    else:
+                        object.__setattr__(self, 'weight_work', w_scaled.requires_grad_(self.weight_master.requires_grad))
                     if b_detached is not None:
-                        object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
+                        if self.bias_work is not None and self.bias_work.dtype == torch.float32 and self.bias_work.device == b_detached.device:
+                            self.bias_work.copy_(b_detached)
+                        else:
+                            object.__setattr__(self, 'bias_work', b_detached.to(torch.float32).requires_grad_(self.bias_master.requires_grad))
                 else:
                     w_fp8 = w_detached.to(self.working_dtype)
-                    object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
+                    if (self.weight_work is not None and self.weight_work.dtype == w_fp8.dtype and
+                            self.weight_work.device == w_fp8.device and self.weight_work.shape == w_fp8.shape):
+                        self.weight_work.copy_(w_fp8)
+                    else:
+                        object.__setattr__(self, 'weight_work', w_fp8.requires_grad_(self.weight_master.requires_grad))
                     if b_detached is not None:
-                        object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+                        if self.bias_work is not None and self.bias_work.dtype == self.working_dtype and self.bias_work.device == b_detached.device:
+                            self.bias_work.copy_(b_detached)
+                        else:
+                            object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
             else:
-                object.__setattr__(self, 'weight_work', w_detached.to(self.working_dtype).requires_grad_(self.weight_master.requires_grad))
+                target_dtype = self.working_dtype
+                if (self.weight_work is not None and self.weight_work.dtype == target_dtype and
+                        self.weight_work.device == w_detached.device and self.weight_work.shape == w_detached.shape):
+                    self.weight_work.copy_(w_detached)
+                else:
+                    object.__setattr__(self, 'weight_work', w_detached.to(target_dtype).requires_grad_(self.weight_master.requires_grad))
                 if b_detached is not None:
-                    object.__setattr__(self, 'bias_work', b_detached.to(self.working_dtype).requires_grad_(self.bias_master.requires_grad))
+                    if self.bias_work is not None and self.bias_work.dtype == target_dtype and self.bias_work.device == b_detached.device:
+                        self.bias_work.copy_(b_detached)
+                    else:
+                        object.__setattr__(self, 'bias_work', b_detached.to(target_dtype).requires_grad_(self.bias_master.requires_grad))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Terminal Ceiling Fast-Path:

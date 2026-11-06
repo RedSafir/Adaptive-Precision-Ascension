@@ -215,6 +215,24 @@ class APAManager:
                 module._forensic_role_stats.clear()
                 module._forensic_role_argmax.clear()
 
+    def reset_all_telemetry(self):
+        """Reset all GPU telemetry buffers (amax, underflow, nonfinite) across all modules.
+        Useful after dummy warmup or CUDA Graph capture so warmup spikes do not leak into training."""
+        with torch.no_grad():
+            self._global_nonfinite.zero_()
+            for module in self.apa_modules.values():
+                module.gpu_amax.zero_()
+                if hasattr(module, 'gpu_amax_x'):
+                    module.gpu_amax_x.zero_()
+                if hasattr(module, 'gpu_amax_grad'):
+                    module.gpu_amax_grad.zero_()
+                module.gpu_underflow_ratio.zero_()
+                module.gpu_has_nonfinite.zero_()
+                module.ema_underflow_ratio = 0.0
+            for module in self.other_modules.values():
+                module.gpu_amax.zero_()
+                module.gpu_has_nonfinite.zero_()
+
     # ------------------------------------------------------------------
     # Detection helpers
     # ------------------------------------------------------------------
@@ -360,6 +378,7 @@ class APAManager:
         if old_level < LEVEL_TF32:
             module.level += 1
             module.ema_underflow_ratio = 0.0
+            module.refresh_working_copy()
             extra_meta = None
             if self.frobenius_telemetry is not None:
                 outlier_info = self.frobenius_telemetry.get_module_outlier_info(name)

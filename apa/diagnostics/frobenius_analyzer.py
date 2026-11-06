@@ -57,14 +57,20 @@ class FrobeniusTelemetry:
     def collect_layer_modules(self, model: nn.Module) -> List[Tuple[str, nn.Module]]:
         """Collect atomic layers with trainable weights ordered by forward execution / naming."""
         layers = []
+        seen_ids = set()
         for name, module in model.named_modules():
+            if id(module) in seen_ids:
+                continue
+            clean_name = name.replace("graphed_backbone.vit.", "")
             # Target APALinear, APAConv2d, APAModule or native Linear/Conv2d leaf modules
             if isinstance(module, APAModule):
-                layers.append((name, module))
+                seen_ids.add(id(module))
+                layers.append((clean_name, module))
             elif isinstance(module, (nn.Linear, nn.Conv2d, nn.Conv1d, nn.Conv3d)):
                 # If module has no children (leaf module) and has weight
                 if len(list(module.children())) == 0 and hasattr(module, 'weight') and module.weight is not None:
-                    layers.append((name, module))
+                    seen_ids.add(id(module))
+                    layers.append((clean_name, module))
         return layers
 
     @torch.no_grad()

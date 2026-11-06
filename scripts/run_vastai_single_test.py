@@ -115,7 +115,7 @@ def is_run_completed(log_path: str, target_epochs: int) -> bool:
     return len(epochs) >= target_epochs
 
 def run_single_test_experiment(val_gamma: float, val_theta: float, args: argparse.Namespace, base_dir: str):
-    tag = f"gamma_{val_gamma}_theta_{val_theta}"
+    tag = f"gamma_{val_gamma}_theta_{val_theta}_ci_{args.check_interval}"
     save_dir = os.path.join(base_dir, 'runs', f"single_test_yolos_{tag}")
     log_file = os.path.join(save_dir, "yolos_training.jsonl")
     events_file = os.path.join(save_dir, "yolos_training_apa_events.jsonl")
@@ -399,11 +399,11 @@ def main():
         }
 
         # Generate Markdown Report
-        report_file = os.path.join(base_dir, 'result', 'single_test_gamma09_theta09_report.md')
+        report_file = os.path.join(base_dir, 'result', f'single_test_gamma{args.gamma}_theta{args.theta_underflow}_ci{args.check_interval}_report.md')
         generate_single_test_report(res, report_file)
 
         # Upload telemetry to Hugging Face Private Storage
-        tag = f"gamma_{args.gamma}_theta_{args.theta_underflow}"
+        tag = f"gamma_{args.gamma}_theta_{args.theta_underflow}_ci_{args.check_interval}"
         save_dir = os.path.join(base_dir, 'runs', f"single_test_yolos_{tag}")
         repo_subfolder = f"yolos_apa_gamma{args.gamma}_theta{args.theta_underflow}_ci{args.check_interval}_epochs{args.epochs}"
         upload_run_to_huggingface(save_dir, repo_subfolder, args.hf_token, args.hf_repo_id, report_file)

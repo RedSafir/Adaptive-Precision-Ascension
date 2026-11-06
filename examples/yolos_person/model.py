@@ -103,13 +103,79 @@ class _YolosViTBackbone(nn.Module):
         return self.vit(x, return_dict=False)[0]
 
 class _GraphedViTWrapper(nn.Module):
-    """Wrapper that adapts a graphed ViT callable to HuggingFace BaseModelOutputWithPooling."""
-    def __init__(self, graphed_backbone):
+    """Wrapper that adapts a graphed ViT callable to HuggingFace BaseModelOutputWithPooling
+    and automatically re-captures the CUDA Graph whenever any APA layer escalates precision."""
+    def __init__(self, raw_vit: nn.Module, sample_input: torch.Tensor, warmup_iters: int = 3):
         super().__init__()
-        self.graphed_backbone = graphed_backbone
+        # Store raw_vit without registering it twice in self._modules (graphed_backbone holds it)
+        object.__setattr__(self, '_raw_vit', raw_vit)
+        self._warmup_iters = max(3, warmup_iters)
+        self._last_levels = []
+        self.graphed_backbone = None
+        self._capture(sample_input, is_initial=True)
+
+    def _get_apa_levels(self):
+        from apa.layers import APAModule
+        return [m.level for m in self._raw_vit.modules() if isinstance(m, APAModule)]
+
+    def _reset_vit_telemetry_and_grads(self):
+        from apa.layers import APAModule
+        with torch.no_grad():
+            for m in self._raw_vit.modules():
+                if isinstance(m, APAModule):
+                    m.gpu_amax.zero_()
+                    if hasattr(m, 'gpu_amax_x'):
+                        m.gpu_amax_x.zero_()
+                    if hasattr(m, 'gpu_amax_grad'):
+                        m.gpu_amax_grad.zero_()
+                    m.gpu_underflow_ratio.zero_()
+                    m.gpu_has_nonfinite.zero_()
+                    m.ema_underflow_ratio = 0.0
+                else:
+                    if hasattr(m, 'gpu_amax') and isinstance(m.gpu_amax, torch.Tensor):
+                        m.gpu_amax.zero_()
+                    if hasattr(m, 'gpu_has_nonfinite') and isinstance(m.gpu_has_nonfinite, torch.Tensor):
+                        m.gpu_has_nonfinite.zero_()
+        self._raw_vit.zero_grad(set_to_none=True)
+
+    def _capture(self, sample_input: torch.Tensor, is_initial: bool = False):
+        from apa.layers import APAModule
+        if self.graphed_backbone is not None:
+            del self.graphed_backbone
+            self.graphed_backbone = None
+            torch.cuda.synchronize(sample_input.device)
+            torch.cuda.empty_cache()
+
+        # Ensure all working copies and telemetry flags are ready before capture
+        with torch.no_grad():
+            for m in self._raw_vit.modules():
+                if isinstance(m, APAModule):
+                    m.is_telemetry_step = (m.config.freeze_level is None)
+                    if m.level != LEVEL_TF32:
+                        m.refresh_working_copy()
+
+        self._raw_vit.zero_grad(set_to_none=True)
+        sample_buf = sample_input.detach().clone()
+        backbone = _YolosViTBackbone(self._raw_vit).to(sample_buf.device)
+        backbone.train(self._raw_vit.training)
+
+        self.graphed_backbone = torch.cuda.make_graphed_callables(
+            backbone,
+            sample_args=(sample_buf,),
+            num_warmup_iters=self._warmup_iters
+        )
+
+        # Clean up any dummy gradients and amax spikes generated during make_graphed_callables warmup
+        self._reset_vit_telemetry_and_grads()
+        self._last_levels = self._get_apa_levels()
+        if not is_initial:
+            print(f"[CUDA Graph] Re-captured YOLOS ViT Backbone after APA precision escalation!", flush=True)
 
     def forward(self, pixel_values: torch.Tensor, **kwargs):
         from transformers.modeling_outputs import BaseModelOutputWithPooling
+        current_levels = self._get_apa_levels()
+        if current_levels != self._last_levels:
+            self._capture(pixel_values, is_initial=False)
         last_hidden_state = self.graphed_backbone(pixel_values)
         return BaseModelOutputWithPooling(last_hidden_state=last_hidden_state)
 
@@ -123,7 +189,7 @@ def create_yolos_hybrid_cuda_graph(
     Captures the static ViT Encoder (which represents ~95% of FP8 GEMM compute)
     into a CUDA Graph via `torch.cuda.make_graphed_callables`, while leaving
     the detection heads (classifier, bbox regressor) and Hungarian matcher
-    in Eager PyTorch autograd.
+    in Eager PyTorch autograd. Automatically re-captures when any layer escalates.
 
     Args:
         model: YolosForObjectDetection instance.
@@ -142,16 +208,7 @@ def create_yolos_hybrid_cuda_graph(
         torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
     print(f"[CUDA Graph] Initializing YOLOS Hybrid CUDA Graph capture (warmup={warmup_iters})...")
-    backbone = _YolosViTBackbone(model.vit).to(sample_input.device)
-    backbone.train(model.training)
-
-    graphed_backbone = torch.cuda.make_graphed_callables(
-        backbone,
-        sample_args=(sample_input,),
-        num_warmup_iters=max(3, warmup_iters)
-    )
-
-    model.vit = _GraphedViTWrapper(graphed_backbone)
+    model.vit = _GraphedViTWrapper(model.vit, sample_input, warmup_iters=warmup_iters)
     print("[CUDA Graph] YOLOS ViT Backbone successfully compiled into CUDA Graph!")
     return model
 
