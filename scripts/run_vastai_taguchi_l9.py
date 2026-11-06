@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument('--enable_frobenius', action='store_true', default=True, help="Enable Frobenius norm diagnostic telemetry (default: True)")
     parser.add_argument('--no_frobenius', dest='enable_frobenius', action='store_false', help="Disable Frobenius norm telemetry")
     parser.add_argument('--frobenius_check_interval', type=int, default=8, help="Fixed step interval for Frobenius norm logging (default: 8)")
-    parser.add_argument('--cuda_graph', action='store_true', default=True, help="Enable Hybrid CUDA Graph acceleration")
+    parser.add_argument('--cuda_graph', action='store_true', default=False, help="Enable Hybrid CUDA Graph acceleration (default: False)")
     parser.add_argument('--no_cuda_graph', dest='cuda_graph', action='store_false', help="Disable CUDA Graph")
     parser.add_argument('--data_dir', type=str, default='datasets/detection-person-and-ball/merged_yolo_person_ball',
                         help="Path to dataset directory")

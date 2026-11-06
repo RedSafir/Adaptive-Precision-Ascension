@@ -83,7 +83,6 @@ else
     python3 scripts/run_vastai_taguchi_l9.py \
         --epochs "${TAGUCHI_EPOCHS:-50}" \
         --batch_size 16 \
-        --cuda_graph \
         --enable_frobenius \
         --on_finish "${ON_FINISH:-stop}" \
         --github_pat "${GITHUB_PAT}"
