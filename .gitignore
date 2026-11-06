@@ -35,13 +35,11 @@ ENV/
 # Datasets
 datasets/
 
-# Runs & Telemetry Logs
-runs/*
-!runs/*/
-!runs/**/*.jsonl
-!runs/**/*.json
+# Runs & Telemetry Logs (Raw experiment logs go to private storage, not git)
+runs/
+*.jsonl
+*.jsonl.gz
 !result/*.md
-!result/*.jsonl
 
 # Jupyter Notebooks
 *.ipynb
