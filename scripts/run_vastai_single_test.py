@@ -228,42 +228,29 @@ def upload_run_to_huggingface(save_dir: str, repo_subfolder: str, hf_token: Opti
         api = HfApi(token=hf_token)
         api.create_repo(repo_id=hf_repo_id, repo_type="dataset", private=True, exist_ok=True)
 
-        # Compress large JSONL files (.jsonl -> .jsonl.gz)
-        for fname in ["yolos_training.jsonl", "yolos_training_frobenius.jsonl"]:
-            raw_path = os.path.join(save_dir, fname)
-            gz_path = raw_path + ".gz"
-            if os.path.exists(raw_path):
-                print(f"[*] Compressing {fname} -> {fname}.gz...", flush=True)
-                with open(raw_path, 'rb') as f_in, gzip.open(gz_path, 'wb') as f_out:
-                    shutil.copyfileobj(f_in, f_out)
+        # Compress raw .jsonl files to .jsonl.gz if not already compressed
+        for fname in os.listdir(save_dir):
+            if fname.endswith(".jsonl"):
+                raw_path = os.path.join(save_dir, fname)
+                gz_path = raw_path + ".gz"
+                if not os.path.exists(gz_path) or os.path.getmtime(raw_path) > os.path.getmtime(gz_path):
+                    print(f"[*] Compressing {fname} -> {fname}.gz ...", flush=True)
+                    with open(raw_path, 'rb') as f_in, gzip.open(gz_path, 'wb', compresslevel=6) as f_out:
+                        shutil.copyfileobj(f_in, f_out)
 
-        files_to_upload = [
-            "yolos_training.jsonl",
-            "yolos_training.jsonl.gz",
-            "yolos_training_apa_events.jsonl",
-            "yolos_training_frobenius.jsonl.gz"
-        ]
-        for fname in files_to_upload:
-            fpath = os.path.join(save_dir, fname)
-            if os.path.exists(fpath):
-                size_mb = os.path.getsize(fpath) / 1e6
-                print(f"[*] Uploading {fname} ({size_mb:.2f} MB)...", flush=True)
-                api.upload_file(
-                    path_or_fileobj=fpath,
-                    path_in_repo=f"{repo_subfolder}/{fname}",
-                    repo_id=hf_repo_id,
-                    repo_type="dataset",
-                    commit_message=f"Upload {fname} for {repo_subfolder}"
-                )
+        # Copy markdown report into save_dir if available
         if report_path and os.path.exists(report_path):
-            rname = os.path.basename(report_path)
-            api.upload_file(
-                path_or_fileobj=report_path,
-                path_in_repo=f"{repo_subfolder}/{rname}",
-                repo_id=hf_repo_id,
-                repo_type="dataset",
-                commit_message=f"Upload report {rname} for {repo_subfolder}"
-            )
+            shutil.copy2(report_path, os.path.join(save_dir, os.path.basename(report_path)))
+
+        # Upload compressed telemetry & markdown report in one atomic commit
+        api.upload_folder(
+            folder_path=save_dir,
+            path_in_repo=repo_subfolder,
+            repo_id=hf_repo_id,
+            repo_type="dataset",
+            allow_patterns=["*.jsonl.gz", "*.md", "*_apa_events.jsonl", "yolos_training.jsonl"],
+            commit_message=f"Upload completed telemetry for {repo_subfolder}"
+        )
         print(f"[✓] All telemetry files uploaded to Hugging Face Private Storage ({hf_repo_id}/{repo_subfolder})!", flush=True)
         return True
     except Exception as e:

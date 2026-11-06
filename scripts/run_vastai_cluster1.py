@@ -271,7 +271,7 @@ def upload_run_to_huggingface(
             path_in_repo=run_tag,
             repo_id=hf_repo_id,
             repo_type="dataset",
-            allow_patterns=["*.jsonl.gz", "*.md", "*_apa_events.jsonl"],
+            allow_patterns=["*.jsonl.gz", "*.md", "*_apa_events.jsonl", "yolos_training.jsonl"],
             commit_message=f"Upload completed telemetry for {run_tag}"
         )
         print(f"[✓] Successfully uploaded '{run_tag}' to Hugging Face dataset: https://huggingface.co/datasets/{hf_repo_id}/tree/main/{run_tag}", flush=True)
