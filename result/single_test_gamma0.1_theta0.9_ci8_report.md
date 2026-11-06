@@ -31,4 +31,4 @@ Laporan ini mendokumentasikan hasil pengujian awal untuk memverifikasi pipeline 
 - [x] `yolos_training_frobenius.jsonl` mencakup `weight_norm`, `grad_norm`, `update_ratio`, dan `amax` per-layer.
 - [x] `yolos_training_apa_events.jsonl` mencatat alasan eskalasi kuantisasi (OVERFLOW vs SILENT_UNDERFLOW).
 
-*Laporan di-generate secara otomatis pada: 2026-11-06 05:28:38 UTC*
+*Laporan di-generate secara otomatis pada: 2026-11-06 05:52:11 UTC*
