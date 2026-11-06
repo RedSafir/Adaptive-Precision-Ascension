@@ -206,7 +206,7 @@ def auto_push_results_to_github(github_pat: str, base_dir: str):
     try:
         subprocess.run(["git", "config", "user.name", "RedSafir"], cwd=base_dir, check=True)
         subprocess.run(["git", "config", "user.email", "mfthnugraha@gmail.com"], cwd=base_dir, check=True)
-        subprocess.run(["git", "add", "-f", "result/", "runs/"], cwd=base_dir, check=True)
+        subprocess.run(["git", "add", "result/"], cwd=base_dir, check=True)
 
         status = subprocess.run(["git", "status", "--porcelain"], cwd=base_dir, capture_output=True, text=True)
         if status.stdout.strip():
