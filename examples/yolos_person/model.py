@@ -112,6 +112,7 @@ class _GraphedViTWrapper(nn.Module):
         self._warmup_iters = max(3, warmup_iters)
         self._last_levels = []
         self.graphed_backbone = None
+        self._mempool = torch.cuda.graph_pool_handle()
         self._capture(sample_input, is_initial=True)
 
     def _get_apa_levels(self):
@@ -139,11 +140,13 @@ class _GraphedViTWrapper(nn.Module):
         self._raw_vit.zero_grad(set_to_none=True)
 
     def _capture(self, sample_input: torch.Tensor, is_initial: bool = False):
+        import gc
         from apa.layers import APAModule
         torch.cuda.synchronize()
         if self.graphed_backbone is not None:
             del self.graphed_backbone
             self.graphed_backbone = None
+            gc.collect()
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
@@ -164,7 +167,8 @@ class _GraphedViTWrapper(nn.Module):
         self.graphed_backbone = torch.cuda.make_graphed_callables(
             backbone,
             sample_args=(sample_buf,),
-            num_warmup_iters=self._warmup_iters
+            num_warmup_iters=self._warmup_iters,
+            pool=self._mempool
         )
 
         # Clean up any dummy gradients and amax spikes generated during make_graphed_callables warmup
@@ -172,7 +176,7 @@ class _GraphedViTWrapper(nn.Module):
         self._last_levels = self._get_apa_levels()
         torch.cuda.synchronize()
         if not is_initial:
-            print(f"[CUDA Graph] Re-captured YOLOS ViT Backbone after APA precision escalation!", flush=True)
+            print(f"[CUDA Graph] Re-captured YOLOS ViT Backbone after APA precision escalation! (Mempool reused)", flush=True)
 
     def forward(self, pixel_values: torch.Tensor, **kwargs):
         from transformers.modeling_outputs import BaseModelOutputWithPooling

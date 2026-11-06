@@ -59,6 +59,7 @@ fi
 
 # 3. Setup Python dependencies & native APA CUDA kernels
 echo "[*] Installing dependencies & building APA kernels..."
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 which python || ln -sf /usr/bin/python3 /usr/bin/python
 python3 -m pip install opencv-python-headless scipy transformers accelerate tqdm pillow datasets huggingface_hub vastai -q
 python3 -m pip install -e ".[examples]"
