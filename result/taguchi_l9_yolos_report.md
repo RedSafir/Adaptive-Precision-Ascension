@@ -13,7 +13,8 @@ Laporan ini mendokumentasikan hasil eksekusi 9 kombinasi ortogonal $L_9(3^3)$ se
 | Run ID | $\gamma$ (Ovf) | $\theta_{\text{uf}}$ (Uf) | $k$ (CI) | Durasi (m) | Throughput (FPS) | Latensi (ms) | Peak VRAM | Final Loss | BBox L1 | GIoU | Eskalasi |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **R1** | `0.1` | `0.1` | `1` | 590.8 | 48.8 | 328.0 | 4649.1 MB | 1.3889 | 0.0243 | 0.4622 | 136 (20O/113U) |
+| **R2** | `0.1` | `0.5` | `8` | 482.0 | 61.4 | 261.4 | 4088.1 MB | 1.7862 | 0.0367 | 0.5892 | 52 (11O/28U) |
 
 ---
 
-*Laporan diperbarui otomatis pada: 2026-11-06 16:15:00 UTC*
+*Laporan diperbarui otomatis pada: 2026-11-07 00:18:22 UTC*
